@@ -6,6 +6,8 @@ extern crate sesdiff;
 use analiticcl::*;
 use analiticcl::test::*;
 
+const LEXICON_AMPHIBIANS: &str = "bindings/python/tests/amphibians.tsv";
+const LEXICON_REPTILES: &str = "bindings/python/tests/reptiles.tsv";
 
 #[test]
 fn test0001_alphabet() {
@@ -941,6 +943,8 @@ fn test0704_find_all_matches_two_batches() {
     assert_eq!( model.match_to_str(matches.get(6).unwrap()) , "sure" );
 }
 
+
+
 #[test]
 fn test0801_model_variants() {
     let (alphabet, _alphabet_size) = get_test_alphabet();
@@ -958,3 +962,46 @@ fn test0801_model_variants() {
     let results = model.find_variants("attemts", &get_test_searchparams(), None);
     assert_eq!( model.decoder.get(results.get(0).unwrap().0 as usize).unwrap().text, "tries");
 }
+
+#[test]
+fn test0901_find_all_matches_with_multiple_lexicons() {
+    let (alphabet, _alphabet_size) = get_test_alphabet();
+    let mut model = VariantModel::new_with_alphabet(alphabet, Weights::default(), 2);
+    assert!(model.read_vocabulary(LEXICON_AMPHIBIANS, &VocabParams::default()).is_ok());
+    assert!(model.read_vocabulary(LEXICON_REPTILES, &VocabParams::default()).is_ok());
+    model.build();
+    assert_eq!( model.lexicons.len(), 2);
+    let inputwords = vec!("Salamander", "lizard","frog","snake","toad");
+    let outputrefwords = vec!("salamander", "lizard","frog","snake","toad");
+    let inputstring = inputwords.join(" ");
+    let matches = model.find_all_matches(inputstring.as_str(), &get_test_searchparams().with_max_ngram(1).with_single_thread());
+    assert_eq!( matches.len(), inputwords.len());
+
+    //Checking input
+    for (i, inputword) in inputwords.iter().enumerate() {
+        assert_eq!( &matches[i].text, inputword);
+    }
+
+    //Checking best variant output
+    for (i, outputrefword) in outputrefwords.iter().enumerate() {
+        assert_eq!( &model.match_to_str(&matches[i]), outputrefword);
+    }
+
+    //salamander
+    assert_eq!( model.lexicons[model.match_to_vocabvalue(&matches[0]).expect("must exist").lexindex as usize],
+                LEXICON_AMPHIBIANS  );
+    //lizard
+    assert_eq!( model.lexicons[model.match_to_vocabvalue(&matches[1]).expect("must exist").lexindex as usize],
+                LEXICON_REPTILES  );
+    //frog
+    assert_eq!( model.lexicons[model.match_to_vocabvalue(&matches[2]).expect("must exist").lexindex as usize],
+                LEXICON_AMPHIBIANS  );
+    //snake
+    assert_eq!( model.lexicons[model.match_to_vocabvalue(&matches[3]).expect("must exist").lexindex as usize],
+                LEXICON_REPTILES  );
+    //toad
+    assert_eq!( model.lexicons[model.match_to_vocabvalue(&matches[4]).expect("must exist").lexindex as usize],
+                LEXICON_AMPHIBIANS  );
+
+}
+

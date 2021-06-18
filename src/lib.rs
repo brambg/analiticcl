@@ -435,11 +435,13 @@ impl VariantModel {
     ///The parameters define what value can be read from what column
     pub fn read_vocabulary(&mut self, filename: &str, params: &VocabParams) -> Result<(), std::io::Error> {
         if self.debug >= 1 {
-            eprintln!("Reading vocabulary from {}...", filename);
+            eprintln!("Reading vocabulary #{} from {}...", self.lexicons.len() + 1, filename);
         }
         let beginlen = self.decoder.len();
         let f = File::open(filename)?;
         let f_buffer = BufReader::new(f);
+        let mut params = params.clone();
+        params.index = self.lexicons.len() as u8;
         for line in f_buffer.lines() {
             if let Ok(line) = line {
                 if !line.is_empty() {
@@ -451,7 +453,7 @@ impl VariantModel {
                     } else {
                         1
                     };
-                    self.add_to_vocabulary(text, Some(frequency), params);
+                    self.add_to_vocabulary(text, Some(frequency), &params);
                 }
             }
         }
@@ -566,13 +568,18 @@ impl VariantModel {
                     item.frequency += frequency;
                 },
                 FrequencyHandling::Max => {
-                    item.frequency = if frequency > item.frequency { frequency } else { item.frequency };
+                    if frequency > item.frequency {
+                        item.frequency  = frequency;
+                    };
                 },
                 FrequencyHandling::Min => {
-                    item.frequency = if frequency < item.frequency { frequency } else { item.frequency };
+                    if frequency < item.frequency {
+                        item.frequency  = frequency;
+                    };
                 },
                 FrequencyHandling::Replace => {
-                    item.frequency = frequency
+                    item.lexindex = params.index;
+                    item.frequency = frequency;
                 },
                 FrequencyHandling::SumIfMoreWeight => {
                     if params.weight > item.lexweight {
@@ -581,17 +588,21 @@ impl VariantModel {
                 },
                 FrequencyHandling::MaxIfMoreWeight => {
                     if params.weight > item.lexweight {
-                        item.frequency = if frequency > item.frequency { frequency } else { item.frequency };
+                        if frequency > item.frequency {
+                            item.frequency  = frequency;
+                        };
                     }
                 },
                 FrequencyHandling::MinIfMoreWeight => {
                     if params.weight > item.lexweight {
-                        item.frequency = if frequency < item.frequency { frequency } else { item.frequency };
+                        if frequency < item.frequency {
+                            item.frequency  = frequency;
+                        };
                     }
                 },
                 FrequencyHandling::ReplaceIfMoreWeight => {
                     if params.weight > item.lexweight {
-                        item.frequency = frequency
+                        item.frequency = frequency;
                     }
                 },
             }
@@ -603,6 +614,9 @@ impl VariantModel {
                 item.vocabtype = VocabType::NoIndex; //by definition
             } else if item.vocabtype == VocabType::Intermediate { //we only override the intermediate type, meaning something can become 'Normal' after having been 'Intermediate', but not vice versa
                 item.vocabtype = params.vocab_type;
+            }
+            if self.debug >= 2 {
+                eprintln!("    (updated) freq={}, lexweight={}, lexindex={}", item.frequency, item.lexweight, item.lexindex);
             }
             *vocab_id
         } else {
@@ -618,6 +632,9 @@ impl VariantModel {
                 variants: None,
                 vocabtype: params.vocab_type
             });
+            if self.debug >= 2 {
+                eprintln!("    (new) lexweight={}, lexindex={}", params.weight, params.index);
+            }
             self.decoder.len() as VocabId - 1
         }
     }
@@ -625,6 +642,11 @@ impl VariantModel {
     /// Find variants in the vocabulary for a given string (in its totality), returns a vector of vocabulary ID and score pairs
     /// The resulting vocabulary Ids can be resolved through `get_vocab()`
     pub fn find_variants(&self, input: &str, params: &SearchParameters, cache: Option<&mut Cache>) -> Vec<(VocabId, f64)> {
+
+        if self.index.is_empty()  {
+            eprintln!("ERROR: Model has not been built yet! Call build() before find_variants()");
+            return vec!();
+        }
 
         //Compute the anahash
         let normstring = input.normalize_to_alphabet(&self.alphabet);
@@ -1156,6 +1178,11 @@ impl VariantModel {
             eprintln!("(finding all matches in text: {})", text);
         }
 
+        if self.index.is_empty()  {
+            eprintln!("ERROR: Model has not been built yet! Call build() before find_all_matches()");
+            return matches;
+        }
+
         //Find the boundaries and classify their strength
         let boundaries = find_boundaries(text);
         let strengths = classify_boundaries(&boundaries);
@@ -1616,10 +1643,20 @@ impl VariantModel {
     /// Gives the text representation for this match, always uses the solution (if any) and falls
     /// back to the input text only when no solution was found.
     pub fn match_to_str<'a>(&'a self, m: &Match<'a>) -> &'a str {
-        if let Some((vocab_id,_)) = m.solution() {
-            self.decoder.get(vocab_id as usize).expect("solution should refer to a valid vocab id").text.as_str()
+        if let Some(vocabvalue) = self.match_to_vocabvalue(m) {
+            vocabvalue.text.as_str()
         } else {
             m.text
+        }
+    }
+
+    /// Gives the vocabitem for this match, always uses the solution (if any) and falls
+    /// back to the input text only when no solution was found.
+    pub fn match_to_vocabvalue<'a>(&'a self, m: &Match<'a>) -> Option<&'a VocabValue> {
+        if let Some((vocab_id,_)) = m.solution() {
+            self.decoder.get(vocab_id as usize)
+        } else {
+            None
         }
     }
 
