@@ -670,7 +670,7 @@ impl VariantModel {
         //and compute distances
         let variants = self.gather_instances(&anahashes, &normstring, input, min(params.max_edit_distance, max_dynamic_distance));
 
-        self.score_and_rank(variants, input, params.max_matches, params.score_threshold)
+        self.score_and_rank(variants, input, params.max_matches, params.score_threshold, params.cutoff_threshold)
     }
 
     /// Processes input and finds variants (like [`find_variants()`]), but all variants that are found (which meet
@@ -965,7 +965,7 @@ impl VariantModel {
 
 
     /// Rank and score all variants
-    pub(crate) fn score_and_rank(&self, instances: Vec<(VocabId,Distance)>, input: &str, max_matches: usize, score_threshold: f64 ) -> Vec<(VocabId,f64)> {
+    pub(crate) fn score_and_rank(&self, instances: Vec<(VocabId,Distance)>, input: &str, max_matches: usize, score_threshold: f64, cutoff_threshold: f64 ) -> Vec<(VocabId,f64)> {
         let mut results: Vec<(VocabId,f64)> = Vec::new();
         let mut max_distance = 0;
         let mut max_freq = 0;
@@ -1039,7 +1039,7 @@ impl VariantModel {
                     //should never happen
                     panic!("Invalid score (NaN) computed for variant={}, distance={:?}, score={}", vocabitem.text, distance, score);
                 }
-                if score >= score_threshold {
+                if score >= score_threshold  {
                     results.push( (*vocab_id, score) );
                     if self.debug >= 1 {
                         eprintln!("   (variant={}, distance={:?}, score={})", vocabitem.text, distance, score);
@@ -1062,7 +1062,7 @@ impl VariantModel {
 
 
 
-        //Crop the results at max_matches
+        //Crop the results at max_matches or cut off at the cutoff threshold
         if max_matches > 0 && results.len() > max_matches {
             let last_score = results.get(max_matches - 1).expect("get last score").1;
             let cropped_score = results.get(max_matches).expect("get cropped score").1;
@@ -1073,7 +1073,7 @@ impl VariantModel {
                 //simplest case, crop at the max_matches
                 results.truncate(max_matches);
             } else {
-                //cropping at max_matches comes at arbitrary of equal scoring items,
+                //cropping at max_matches comes at arbitrary point of equal scoring items,
                 //we crop earlier instead:
                 let mut early_cutoff = 0;
                 let mut late_cutoff = 0;
@@ -1100,10 +1100,43 @@ impl VariantModel {
             }
         }
 
+
         //rescore with confusable weights (LATE, default)
         if !self.confusables.is_empty() && !self.confusables_before_pruning {
             self.rescore_confusables(&mut results, input);
         }
+
+        // apply the cutoff threshold
+        let mut cutoff = 0;
+        let mut bestscore = None;
+        if cutoff_threshold >= 1.0 {
+            for (i, result) in results.iter().enumerate() {
+                if let Some(bestscore) = bestscore {
+                    if result.1 <= bestscore / cutoff_threshold {
+                        cutoff = i;
+                        break;
+                    }
+                } else {
+                    bestscore = Some(result.1);
+                }
+            }
+        }
+        if cutoff > 0 {
+            let l = results.len();
+            results.truncate(cutoff);
+            if self.debug >= 1 {
+                eprintln!("   (truncating {} matches to {} due to cutoff value)", l, results.len());
+            }
+        }
+
+        if self.debug >= 1 {
+            for (i, (vocab_id, score)) in results.iter().enumerate() {
+                if let Some(vocabitem) = self.decoder.get(*vocab_id as usize) {
+                    eprintln!("   (ranked #{}, variant={}, score={})", i+1, vocabitem.text, score);
+                }
+            }
+        }
+
 
         if self.debug >= 1 {
             let endtime = SystemTime::now();
@@ -1174,6 +1207,10 @@ impl VariantModel {
     pub fn find_all_matches<'a>(&self, text: &'a str, params: &SearchParameters) -> Vec<Match<'a>> {
         let mut matches = Vec::new();
 
+        if text.is_empty() {
+            return matches;
+        }
+
         if self.debug >= 1 {
             eprintln!("(finding all matches in text: {})", text);
         }
@@ -1243,7 +1280,7 @@ impl VariantModel {
                 if params.max_ngram > 1 {
                     //(debug will be handled in the called method)
                     matches.extend(
-                        self.most_likely_sequence(all_segments, boundaries, begin, boundary.offset.begin, params).into_iter()
+                        self.most_likely_sequence(all_segments, boundaries, begin, boundary.offset.begin, params, text_current).into_iter()
                     );
                 } else {
                     if self.debug >= 1 {
@@ -1274,7 +1311,7 @@ impl VariantModel {
 
 
     /// Find the solution that maximizes the variant scores, decodes using a Weighted Finite State Transducer
-    fn most_likely_sequence<'a>(&self, matches: Vec<Match<'a>>, boundaries: &[Match<'a>], begin_offset: usize, end_offset: usize, params: &SearchParameters) -> Vec<Match<'a>> {
+    fn most_likely_sequence<'a>(&self, matches: Vec<Match<'a>>, boundaries: &[Match<'a>], begin_offset: usize, end_offset: usize, params: &SearchParameters, input_text: &str) -> Vec<Match<'a>> {
         if self.debug >= 1 {
             eprintln!("(building FST for finding most likely sequence in range {}:{})", begin_offset, end_offset);
         }
@@ -1332,15 +1369,27 @@ impl VariantModel {
                 }
             }
 
+            let n;
             let prevstate= if let Some(prevboundary) = prevboundary {
+                n = nextboundary.expect("next boundary must exist") - prevboundary;
                 *states.get(prevboundary).expect("prev state must exist")
             } else {
+                n = nextboundary.expect("next boundary must exist") + 1;
                 start
             };
             let nextstate = *states.get(nextboundary.expect("next boundary must exist")).expect("next state must exist");
 
             if m.variants.is_some() && !m.variants.as_ref().unwrap().is_empty() {
                 for (variant_index, (variant, score)) in m.variants.as_ref().unwrap().iter().enumerate() {
+                    if n > 1 {
+                        let variant_text = self.decoder.get(*variant as usize).expect("variant_text").text.as_str();
+                        if variant_text == m.text {
+                            //input equals output, this n-gram has no added value
+                            //as it should already be covered by unigrams
+                            continue; //do not add a transition
+                        }
+                    }
+
                     let output_symbol = output_symbols.len();
                     output_symbols.push( OutputSymbol {
                         vocab_id: *variant,
@@ -1361,7 +1410,7 @@ impl VariantModel {
 
                     fst.add_tr(prevstate, Tr::new(input_symbol, output_symbol, -1.0 * score.ln() as f32, nextstate)).expect("adding transition");
                 }
-            } else {
+            } else if n == 1 { //only for unigrams
                 let output_symbol = output_symbols.len();
                 output_symbols.push( OutputSymbol {
                     vocab_id: 0, //0 vocab_id means we have an Out-of-Vocabulary word to copy from input
@@ -1392,7 +1441,11 @@ impl VariantModel {
             eprintln!(" (finding shortest path)");
             fst.set_input_symbols(Arc::new(symtab_in));
             fst.set_output_symbols(Arc::new(symtab_out));
-            if let Err(e) = fst.draw("/tmp/fst.dot", &DrawingConfig::default() ) {
+            let input_text_filename = input_text.replace(" ","_").replace("\"","").replace("'","").replace(".","").replace("/","").replace("?",""); //strip filename unfriendly chars
+            let mut config = DrawingConfig::default();
+            config.portrait = true;
+            config.title = input_text.to_owned();
+            if let Err(e) = fst.draw(format!("/tmp/analiticcl.{}.fst.dot", input_text_filename.as_str()), &config ) {
                 panic!("FST draw error: {}", e);
             }
         }
