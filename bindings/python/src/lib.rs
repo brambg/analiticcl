@@ -84,6 +84,7 @@ fn extract_distance_threshold(value: &PyAny) -> PyResult<libanaliticcl::Distance
 }
 
 
+
 #[pyclass(dict,name="SearchParameters")]
 #[derive(Default,Clone)]
 pub struct PySearchParameters {
@@ -313,6 +314,24 @@ pub struct PyVariantModel {
     model: libanaliticcl::VariantModel,
 }
 
+impl PyVariantModel {
+    fn variantresult_to_dict<'py>(&self, result: &libanaliticcl::VariantResult, freq_weight: f32, py: Python<'py>) -> PyResult<&'py PyDict> {
+        let dict = PyDict::new(py);
+        let vocabvalue = self.model.get_vocab(result.vocab_id).expect("getting vocab by id");
+        let lexicon = self.model.lexicons.get(vocabvalue.lexindex as usize).expect("valid lexicon index");
+        dict.set_item("text", vocabvalue.text.as_str())?;
+        dict.set_item("score", result.score(freq_weight))?;
+        dict.set_item("dist_score", result.dist_score)?;
+        dict.set_item("freq_score", result.freq_score)?;
+        if let Some(via_id) = result.via {
+            let viavalue = self.model.get_vocab(via_id).expect("getting vocab by id");
+            dict.set_item("via", viavalue.text.as_str())?;
+        }
+        dict.set_item("lexicon", lexicon.as_str())?;
+        Ok(dict)
+    }
+}
+
 #[pymethods]
 impl PyVariantModel {
     #[new]
@@ -369,18 +388,10 @@ impl PyVariantModel {
         }
     }
 
-    ///Load a variant list
-    fn read_variants(&mut self, filename: &str) -> PyResult<()> {
-        match self.model.read_variants(filename, Some(&libanaliticcl::VocabParams::default())) {
-            Ok(_) => Ok(()),
-            Err(e) => Err(PyRuntimeError::new_err(format!("{}", e)))
-        }
-    }
-
-    ///Load a weighted variant list (set intermediate to true if this is an error list and you
-    ///don't want the variants to be used in matching)
-    fn read_weighted_variants(&mut self, filename: &str, intermediate: bool) -> PyResult<()> {
-        match self.model.read_weighted_variants(filename, Some(&libanaliticcl::VocabParams::default()), intermediate) {
+    ///Load a weighted variant list (set transparent to true if this is an error list and you
+    ///don't want the variants themselves to be returned when matching; i.e. they are transparent)
+    fn read_variants(&mut self, filename: &str, transparent: bool) -> PyResult<()> {
+        match self.model.read_variants(filename, Some(&libanaliticcl::VocabParams::default()), transparent) {
             Ok(_) => Ok(()),
             Err(e) => Err(PyRuntimeError::new_err(format!("{}", e)))
         }
@@ -400,44 +411,33 @@ impl PyVariantModel {
         self.model.has(text)
     }
 
+
     /// Find variants in the vocabulary for a given string (in its totality), returns a list of variants with scores and their source lexicons
     fn find_variants<'py>(&self, input: &str, params: PyRef<PySearchParameters>, py: Python<'py>) -> PyResult<&'py PyList> {
-        let result = PyList::empty(py);
-        let results = self.model.find_variants(input, &params.data, None);
-        for (vocab_id,score,freq_score) in results {
-            let dict = PyDict::new(py);
-            let vocabvalue = self.model.get_vocab(vocab_id).expect("getting vocab by id");
-            let lexicon = self.model.lexicons.get(vocabvalue.lexindex as usize).expect("valid lexicon index");
-            dict.set_item("text", vocabvalue.text.as_str())?;
-            dict.set_item("score", score)?;
-            dict.set_item("freq_score", freq_score)?;
-            dict.set_item("lexicon", lexicon.as_str())?;
-            result.append(dict)?;
+        let pyresults = PyList::empty(py);
+        let results = self.model.find_variants(input, &params.data);
+        for result in results {
+            let dict = self.variantresult_to_dict(&result, params.data.freq_weight, py)?;
+            pyresults.append(dict)?;
         }
-        Ok(result)
+        Ok(pyresults)
     }
 
     /// Find variants in the vocabulary for all multiple string items at once, provided in in the input list. Returns a list of variants with scores and their source lexicons. Will use parallellisation under the hood.
     fn find_variants_par<'py>(&self, input: Vec<&str>, params: PyRef<PySearchParameters>, py: Python<'py>) -> PyResult<&'py PyList> {
         let params_data = &params.data;
-        let output: Vec<(&str,Vec<(libanaliticcl::VocabId,f64, f64)>)> = input
+        let output: Vec<(&str,Vec<libanaliticcl::VariantResult>)> = input
             .par_iter()
             .map(|input_str| {
-                (*input_str, self.model.find_variants(input_str, params_data, None))
+                (*input_str, self.model.find_variants(input_str, params_data))
             }).collect();
         let results = PyList::empty(py);
         for (input_str, variants) in output {
             let odict = PyDict::new(py);
             let olist = PyList::empty(py);
             odict.set_item("input", input_str)?;
-            for (vocab_id, score, freq_score) in variants {
-                let dict = PyDict::new(py);
-                let vocabvalue = self.model.get_vocab(vocab_id).expect("getting vocab by id");
-                let lexicon = self.model.lexicons.get(vocabvalue.lexindex as usize).expect("valid lexicon index");
-                dict.set_item("text", vocabvalue.text.as_str())?;
-                dict.set_item("score", score)?;
-                dict.set_item("freq_score", freq_score)?;
-                dict.set_item("lexicon", lexicon.as_str())?;
+            for result in variants {
+                let dict = self.variantresult_to_dict(&result, params.data.freq_weight, py)?;
                 olist.append(dict)?;
             }
             odict.set_item("variants", olist)?;
@@ -461,26 +461,14 @@ impl PyVariantModel {
             let olist = PyList::empty(py);
             if let Some(variants) = m.variants {
                 if let Some(selected) = m.selected {
-                    if let Some((vocab_id, score,freq_score)) = variants.get(selected) {
-                        let dict = PyDict::new(py);
-                        let vocabvalue = self.model.get_vocab(*vocab_id).expect("getting vocab by id");
-                        let lexicon = self.model.lexicons.get(vocabvalue.lexindex as usize).expect("valid lexicon index");
-                        dict.set_item("text", vocabvalue.text.as_str())?;
-                        dict.set_item("score", score)?;
-                        dict.set_item("freq_score", freq_score)?;
-                        dict.set_item("lexicon", lexicon.as_str())?;
+                    if let Some(result) = variants.get(selected) {
+                        let dict = self.variantresult_to_dict(&result, params.data.freq_weight, py)?;
                         olist.append(dict)?;
                     }
                 }
-                for (i, (vocab_id, score, freq_score)) in variants.iter().enumerate() {
+                for (i, result) in variants.iter().enumerate() {
                     if m.selected.is_none() || m.selected.unwrap() != i { //output all others
-                        let dict = PyDict::new(py);
-                        let vocabvalue = self.model.get_vocab(*vocab_id).expect("getting vocab by id");
-                        let lexicon = self.model.lexicons.get(vocabvalue.lexindex as usize).expect("valid lexicon index");
-                        dict.set_item("text", vocabvalue.text.as_str())?;
-                        dict.set_item("score", score)?;
-                        dict.set_item("freq_score", freq_score)?;
-                        dict.set_item("lexicon", lexicon.as_str())?;
+                        let dict = self.variantresult_to_dict(&result, params.data.freq_weight, py)?;
                         olist.append(dict)?;
                     }
                 }

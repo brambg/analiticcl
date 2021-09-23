@@ -12,7 +12,7 @@ use rayon::prelude::*;
 
 use analiticcl::*;
 
-fn output_matches_as_tsv(model: &VariantModel, input: &str, variants: Option<&Vec<(VocabId, f64, f64)>>, selected: Option<usize>, offset: Option<Offset>, output_lexmatch: bool) {
+fn output_matches_as_tsv(model: &VariantModel, input: &str, variants: Option<&Vec<VariantResult>>, selected: Option<usize>, offset: Option<Offset>, output_lexmatch: bool, freq_weight: f32) {
     print!("{}",input);
     if let Some(offset) = offset {
         print!("\t{}:{}",offset.begin, offset.end);
@@ -20,28 +20,28 @@ fn output_matches_as_tsv(model: &VariantModel, input: &str, variants: Option<&Ve
     if let Some(variants) = variants {
         if let Some(selected) = selected {
             //output selected value before all others
-            if let Some((vocab_id, score, _freq_score)) = variants.get(selected) {
-                let vocabvalue = model.get_vocab(*vocab_id).expect("getting vocab by id");
-                print!("\t{}\t{}\t", vocabvalue.text, score);
-                if  output_lexmatch {
-                    print!("\t{}", model.lexicons.get(vocabvalue.lexindex as usize).expect("valid lexicon index"));
-                }
+            if let Some(result) = variants.get(selected) {
+                output_result_as_tsv(&model, &result, output_lexmatch, freq_weight);
             }
         }
-        for (i, (vocab_id, score, _freq_score)) in variants.iter().enumerate() {
+        for (i, result) in variants.iter().enumerate() {
             if selected.is_none() || selected.unwrap() != i { //output all others
-                let vocabvalue = model.get_vocab(*vocab_id).expect("getting vocab by id");
-                print!("\t{}\t{}\t", vocabvalue.text, score);
-                if  output_lexmatch {
-                    print!("\t{}", model.lexicons.get(vocabvalue.lexindex as usize).expect("valid lexicon index"));
-                }
+                output_result_as_tsv(&model, &result, output_lexmatch, freq_weight);
             }
         }
     }
     println!();
 }
 
-fn output_matches_as_json(model: &VariantModel, input: &str, variants: Option<&Vec<(VocabId, f64, f64)>>, selected: Option<usize>, offset: Option<Offset>, output_lexmatch: bool, seqnr: usize) {
+fn output_result_as_tsv(model: &VariantModel, result: &VariantResult, output_lexmatch: bool, freq_weight: f32) {
+    let vocabvalue = model.get_vocab(result.vocab_id).expect("getting vocab by id");
+    print!("\t{}\t{}\t", vocabvalue.text, result.score(freq_weight));
+    if  output_lexmatch {
+        print!("\t{}", model.lexicons.get(vocabvalue.lexindex as usize).expect("valid lexicon index"));
+    }
+}
+
+fn output_matches_as_json(model: &VariantModel, input: &str, variants: Option<&Vec<VariantResult>>, selected: Option<usize>, offset: Option<Offset>, output_lexmatch: bool, freq_weight: f32, seqnr: usize) {
     if seqnr > 1 {
         println!(",")
     }
@@ -53,38 +53,37 @@ fn output_matches_as_json(model: &VariantModel, input: &str, variants: Option<&V
         println!(", \"variants\": [ ");
         let l = variants.len();
         if let Some(selected) = selected {
-            if let Some((vocab_id, score, freq_score)) = variants.get(selected) {
-                let vocabvalue = model.get_vocab(*vocab_id).expect("getting vocab by id");
-                print!("        {{ \"text\": \"{}\", \"score\": {}", vocabvalue.text.replace("\"","\\\""), score);
-                print!(", \"freq_score\": {}", freq_score);
-                if  output_lexmatch {
-                    print!(", \"lexicon\": \"{}\"", model.lexicons.get(vocabvalue.lexindex as usize).expect("valid lexicon index"));
-                }
-                if 0 < l - 1 {
-                    println!(" }},");
-                } else {
-                    println!(" }}");
-                }
+            if let Some(result) = variants.get(selected) {
+                output_result_as_json(&model, &result, output_lexmatch, freq_weight, l - 1 == 0);
             }
         }
-        for (i, (vocab_id, score, freq_score)) in variants.iter().enumerate() {
+        for (i, result) in variants.iter().enumerate() {
             if selected.is_none() || selected.unwrap() != i { //output all others
-                let vocabvalue = model.get_vocab(*vocab_id).expect("getting vocab by id");
-                print!("        {{ \"text\": \"{}\", \"score\": {}", vocabvalue.text.replace("\"","\\\""), score);
-                print!(", \"freq_score\": {}", freq_score);
-                if  output_lexmatch {
-                    print!(", \"lexicon\": \"{}\"", model.lexicons.get(vocabvalue.lexindex as usize).expect("valid lexicon index"));
-                }
-                if i < l - 1 {
-                    println!(" }},");
-                } else {
-                    println!(" }}");
-                }
+                output_result_as_json(&model, &result, output_lexmatch, freq_weight, l - 1 == i);
             }
         }
         println!("    ] }}");
     } else {
         println!(" }}");
+    }
+}
+
+fn output_result_as_json(model: &VariantModel, result: &VariantResult, output_lexmatch: bool, freq_weight: f32, last: bool) {
+    let vocabvalue = model.get_vocab(result.vocab_id).expect("getting vocab by id");
+    print!("        {{ \"text\": \"{}\", \"score\": {}", vocabvalue.text.replace("\"","\\\""), result.score(freq_weight));
+    print!(", \"dist_score\": {}", result.dist_score);
+    print!(", \"freq_score\": {}", result.freq_score);
+    if let Some(via_id) = result.via {
+        let viavalue = model.get_vocab(via_id).expect("getting vocab by id");
+        print!(", \"via\": {}", viavalue.text.replace("\"","\\\""));
+    }
+    if  output_lexmatch {
+        print!(", \"lexicon\": \"{}\"", model.lexicons.get(vocabvalue.lexindex as usize).expect("valid lexicon index"));
+    }
+    if last {
+        println!(" }}");
+    } else {
+        println!(" }},");
     }
 }
 
@@ -117,19 +116,9 @@ fn output_weighted_variants_as_tsv(model: &VariantModel, multioutput: bool) {
         if let Some(variants) = &vocabitem.variants {
             print!("{}", vocabitem.text);
             for variant in variants {
-                match variant {
-                    VariantReference::WeightedVariant((vocab_id, score)) => {
-                        let variantitem = model.decoder.get(*vocab_id as usize).expect("vocab id must exist");
-                        output_weighted_variant_as_tsv(&variantitem.text, *score, variantitem.lexindex, multioutput, &mut outfiles, model);
-                    },
-                    VariantReference::VariantCluster(cluster_id) => {
-
-                        let cluster = model.variantclusters.get(&cluster_id).expect("cluster id must exist");
-                        for vocab_id in cluster.iter() {
-                            let variantitem = model.decoder.get(*vocab_id as usize).expect("vocab id must exist");
-                            output_weighted_variant_as_tsv(&variantitem.text, 1.0, variantitem.lexindex, multioutput, &mut outfiles, model);
-                        }
-                    }
+                if let VariantReference::ReferenceFor((vocab_id, score)) = variant {
+                    let variantitem = model.decoder.get(*vocab_id as usize).expect("vocab id must exist");
+                    output_weighted_variant_as_tsv(&variantitem.text, *score, variantitem.lexindex, multioutput, &mut outfiles, model);
                 }
             }
             println!();
@@ -165,19 +154,9 @@ fn output_weighted_variants_as_json(model: &VariantModel, multioutput: bool) {
         println!("    \"{}\": [ ", vocabitem.text.replace("\"","\\\"").as_str());
         if let Some(variants) = &vocabitem.variants {
             for variant in variants {
-                match variant {
-                    VariantReference::WeightedVariant((vocab_id, score)) => {
-                        let variantitem = model.decoder.get(*vocab_id as usize).expect("vocab id must exist");
-                        output_weighted_variant_as_json(&variantitem.text, *score, variantitem.lexindex, multioutput, &mut outfiles, model);
-                    },
-                    VariantReference::VariantCluster(cluster_id) => {
-
-                        let cluster = model.variantclusters.get(&cluster_id).expect("cluster id must exist");
-                        for vocab_id in cluster.iter() {
-                            let variantitem = model.decoder.get(*vocab_id as usize).expect("vocab id must exist");
-                            output_weighted_variant_as_json(&variantitem.text, 1.0, variantitem.lexindex, multioutput, &mut outfiles, model);
-                        }
-                    }
+                if let VariantReference::ReferenceFor((vocab_id, score)) = variant {
+                    let variantitem = model.decoder.get(*vocab_id as usize).expect("vocab id must exist");
+                    output_weighted_variant_as_json(&variantitem.text, *score, variantitem.lexindex, multioutput, &mut outfiles, model);
                 }
             }
         }
@@ -186,7 +165,7 @@ fn output_weighted_variants_as_json(model: &VariantModel, multioutput: bool) {
     println!("}}")
 }
 
-fn process(model: &VariantModel, inputstream: impl Read, searchparams: &SearchParameters, output_lexmatch: bool, json: bool, cache: &mut Option<Cache>, progress: bool) {
+fn process(model: &VariantModel, inputstream: impl Read, searchparams: &SearchParameters, output_lexmatch: bool, json: bool, progress: bool) {
     let mut seqnr = 0;
     let f_buffer = BufReader::new(inputstream);
     let mut progresstime = SystemTime::now();
@@ -196,15 +175,12 @@ fn process(model: &VariantModel, inputstream: impl Read, searchparams: &SearchPa
             if progress && seqnr % 1000 == 1 {
                 progresstime = show_progress(seqnr, progresstime, 1000);
             }
-            let variants = model.find_variants(&input, searchparams, cache.as_mut());
+            let variants = model.find_variants(&input, searchparams);
             if json {
-                output_matches_as_json(model, &input, Some(&variants), Some(0), None, output_lexmatch, seqnr);
+                output_matches_as_json(model, &input, Some(&variants), Some(0), None, output_lexmatch, searchparams.freq_weight, seqnr);
             } else {
                 //Normal output mode
-                output_matches_as_tsv(model, &input, Some(&variants), Some(0), None,  output_lexmatch);
-            }
-            if let Some(cache) = cache {
-                cache.check();
+                output_matches_as_tsv(model, &input, Some(&variants), Some(0), None,  output_lexmatch, searchparams.freq_weight);
             }
         }
     }
@@ -235,15 +211,15 @@ fn process_par(model: &VariantModel, inputstream: impl Read, searchparams: &Sear
         let output: Vec<_> = batch
             .par_iter()
             .map(|input| {
-                (input, model.find_variants(&input, searchparams, None))
+                (input, model.find_variants(&input, searchparams))
             }).collect();
         for (input, variants) in output {
             seqnr += 1;
             if json {
-                output_matches_as_json(model, &input, Some(&variants), Some(0), None, output_lexmatch, seqnr);
+                output_matches_as_json(model, &input, Some(&variants), Some(0), None, output_lexmatch, searchparams.freq_weight, seqnr);
             } else {
                 //Normal output mode
-                output_matches_as_tsv(model, &input, Some(&variants), Some(0), None, output_lexmatch);
+                output_matches_as_tsv(model, &input, Some(&variants), Some(0), None, output_lexmatch, searchparams.freq_weight);
             }
         }
         if progress {
@@ -319,10 +295,10 @@ fn process_search(model: &VariantModel, inputstream: impl Read, searchparams: &S
         for result_match in output {
             seqnr += 1;
             if json {
-                output_matches_as_json(model, result_match.text, result_match.variants.as_ref(), result_match.selected, Some(result_match.offset), output_lexmatch, seqnr);
+                output_matches_as_json(model, result_match.text, result_match.variants.as_ref(), result_match.selected, Some(result_match.offset), output_lexmatch, searchparams.freq_weight, seqnr);
             } else {
                 //Normal output mode
-                output_matches_as_tsv(model, result_match.text, result_match.variants.as_ref(), result_match.selected, Some(result_match.offset), output_lexmatch);
+                output_matches_as_tsv(model, result_match.text, result_match.variants.as_ref(), result_match.selected, Some(result_match.offset), output_lexmatch, searchparams.freq_weight);
             }
         }
         if progress {
@@ -353,25 +329,18 @@ pub fn common_arguments<'a,'b>() -> Vec<clap::Arg<'a,'b>> {
         .takes_value(true)
         .number_of_values(1)
         .multiple(true)
-        .required_unless("weighted-variants"));
+        .required_unless("variants"));
     args.push(Arg::with_name("variants")
         .long("variants")
         .short("V")
-        .help("Loads a variant list, a tab-separated file in which all items on a single line are considered variants of equal weight. This option may be used multiple times.")
-        .takes_value(true)
-        .number_of_values(1)
-        .multiple(true));
-    args.push(Arg::with_name("weighted-variants")
-        .long("weighted-variants")
-        .short("W")
-        .help("Loads a weighted variant list, the first column contains the lexicon word and subsequent repeating columns (tab-separated) contain respectively a variant and the score of the variant. This option may be used multiple times.")
+        .help("Loads a (weighted) variant list, the first column contains the lexicon word and subsequent repeating columns (tab-separated) contain respectively a variant and the score of the variant. This option may be used multiple times.")
         .takes_value(true)
         .number_of_values(1)
         .multiple(true));
     args.push(Arg::with_name("errors")
         .long("errors")
         .short("E")
-        .help("This is a form of --weighted-variants in which all the variants are considered erroneous forms, they will be used only to find the authoritative solution from the first column and won't be returned as solutions themselves. This option may be used multiple times.")
+        .help("This is a form of --variants in which all the variants are considered erroneous forms, they will be used only to find the authoritative solution from the first column and won't be returned as solutions themselves (i.e. they are transparent). This option may be used multiple times.")
         .takes_value(true)
         .number_of_values(1)
         .multiple(true));
@@ -430,16 +399,10 @@ pub fn common_arguments<'a,'b>() -> Vec<clap::Arg<'a,'b>> {
         .long("freq-ranking")
         .help("Consider frequency information and not just similarity scores when ranking variant candidates. The actual ranking will be a weighted combination between the similarity score and the frequency score. The value for this parameter is the weight you want to attribute to the frequency component in ranking, in relation to similarity. (a value between 0 and 1.0). Note that even if this parameter is not set, frequency information will always be used to break ties in case of similarity score")
         .takes_value(true));
-    /*args.push(Arg::with_name("search-cache")
-        .long("search-cache")
-        .help("Cache visited nodes between searches to speed up the search at the cost of increased memory. Only works for single core currently where it is enabled by default. The value corresponds to the maximum number of anagram values to cache, this should be set to a fairly high number, depending on memory availability, such as 100000. Set to 0 to disable the cache.")
-        .takes_value(true)
-        .default_value("100000")
-        .required(false));*/
     args.push(Arg::with_name("single-thread")
         .long("single-thread")
         .short("1")
-        .help("Run in a single thread, when running this way you can benefit from the --search-cache. If you want more than one thread but less than all available cores, set environment variable RAYON_NUM_THREADS")
+        .help("Run in a single thread, If you want more than one thread but less than all available cores, set environment variable RAYON_NUM_THREADS instead")
         .required(false));
     args.push(Arg::with_name("interactive")
         .long("interactive")
@@ -574,7 +537,7 @@ fn main() {
                     )
                     .subcommand(
                         SubCommand::with_name("learn")
-                            .about("Learn variants from the input data. Outputs a weighted variant list.")
+                            .about("Learn variants from the input data. Outputs a (weighted) variant list.")
                             .args(&common_arguments())
                             .arg(Arg::with_name("iterations")
                                 .short("I")
@@ -585,7 +548,7 @@ fn main() {
                             .arg(Arg::with_name("multi-output")
                                 .short("O")
                                 .long("multi-output")
-                                .help("Output to multiple weighted variant lists rather than to standard output, each variant lists corresponds to an input lexicon. This allows keeping the link with the original lexicon."))
+                                .help("Output to multiple (weighted) variant lists rather than to standard output, each variant lists corresponds to an input lexicon. This allows keeping the link with the original lexicon."))
                     )
                     .arg(Arg::with_name("debug")
                         .long("debug")
@@ -617,17 +580,6 @@ fn main() {
         case: args.value_of("weight-case").unwrap().parse::<f64>().expect("Weights should be a floating point value"),
     };
 
-    let mut cache = if let Some(visited_max_size) = args.value_of("search-cache") {
-        //deprecated
-        let visited_max_size = visited_max_size.parse::<usize>().expect("Cache size should be a large integer");
-        if visited_max_size > 0 {
-            Some(Cache::new(visited_max_size))
-        } else {
-            None
-        }
-    } else {
-        None
-    };
 
     let mut model = VariantModel::new(
         args.value_of("alphabet").unwrap(),
@@ -653,19 +605,13 @@ fn main() {
 
     if args.is_present("variants") {
         for filename in args.values_of("variants").unwrap().collect::<Vec<&str>>() {
-            model.read_variants(filename, Some(&VocabParams::default())).expect(&format!("Error reading variant list {}", filename));
-        }
-    }
-
-    if args.is_present("weighted-variants") {
-        for filename in args.values_of("weighted-variants").unwrap().collect::<Vec<&str>>() {
-            model.read_weighted_variants(filename, Some(&VocabParams::default()), false).expect(&format!("Error reading weighted variant list {}", filename));
+            model.read_variants(filename, Some(&VocabParams::default()), false).expect(&format!("Error reading weighted variant list {}", filename));
         }
     }
 
     if args.is_present("errors") {
         for filename in args.values_of("errors").unwrap().collect::<Vec<&str>>() {
-            model.read_weighted_variants(filename, Some(&VocabParams::default()), true).expect(&format!("Error reading error list {}", filename));
+            model.read_variants(filename, Some(&VocabParams::default()), true).expect(&format!("Error reading error list {}", filename));
         }
     }
 
@@ -795,7 +741,7 @@ fn main() {
                         process_search(&model, stdin, &searchparams, output_lexmatch, json, progress, !retain_linebreaks, perline);
                     } else if searchparams.single_thread {
                         eprintln!("(accepting standard input; enter input to match, one per line)");
-                        process(&model, stdin,  &searchparams, output_lexmatch, json, &mut cache, progress);
+                        process(&model, stdin,  &searchparams, output_lexmatch, json, progress);
                     } else {
                         eprintln!("(accepting standard input; enter input to match, one per line, output may be delayed until end of input due to parallellisation)");
                         //normal parallel behaviour
@@ -810,7 +756,7 @@ fn main() {
                     } else if rootargs.subcommand_matches("search").is_some() {
                         process_search(&model, f, &searchparams, output_lexmatch, json, progress, !retain_linebreaks, perline);
                     } else if searchparams.single_thread {
-                        process(&model, f, &searchparams, output_lexmatch, json, &mut cache, progress);
+                        process(&model, f, &searchparams, output_lexmatch, json, progress);
                     } else {
                         //normal parallel behaviour
                         process_par(&model, f, &searchparams, output_lexmatch, json, progress).expect("I/O Error");

@@ -645,7 +645,7 @@ fn test0403_model_anagrams() {
         model.add_to_vocabulary(text,None,&VocabParams::default());
     }
     model.build();
-    model.find_variants("rite", &get_test_searchparams(), None);
+    model.find_variants("rite", &get_test_searchparams());
 }
 
 #[test]
@@ -657,13 +657,14 @@ fn test0404_score_test() {
         model.add_to_vocabulary(text,None,&VocabParams::default());
     }
     model.build();
-    let results = model.find_variants("huys", &get_test_searchparams(), None);
+    let results = model.find_variants("huys", &get_test_searchparams());
     //results are a bit indeterministic due to sort_unstable
     //(order of equal-scoring elements is not fixed)
     //we just check if we get two results with the same score
     assert_eq!( results.len(), 2);
-    assert_ne!( results.get(0).unwrap().0, results.get(1).unwrap().0 );
-    assert_eq!( results.get(0).unwrap().1, results.get(1).unwrap().1 );
+    assert_ne!( results.get(0).unwrap().vocab_id, results.get(1).unwrap().vocab_id );
+    assert_eq!( results.get(0).unwrap().dist_score, results.get(1).unwrap().dist_score );
+    assert_eq!( results.get(0).unwrap().freq_score, results.get(1).unwrap().freq_score );
 }
 
 
@@ -689,10 +690,10 @@ fn test0502_confusable_test() {
     }
     model.add_to_confusables("-[y]+[i]",1.1).expect("added to confusables");
     model.build();
-    let results = model.find_variants("huys", &get_test_searchparams(), None);
-    assert_eq!( model.decoder.get(results.get(0).unwrap().0 as usize).unwrap().text, "huis");
-    assert_eq!( model.decoder.get(results.get(1).unwrap().0 as usize).unwrap().text, "huls");
-    assert!( results.get(0).unwrap().1 > results.get(1).unwrap().1, "score of huis should be greater than that of huls" );
+    let results = model.find_variants("huys", &get_test_searchparams());
+    assert_eq!( model.decoder.get(results.get(0).unwrap().vocab_id as usize).unwrap().text, "huis");
+    assert_eq!( model.decoder.get(results.get(1).unwrap().vocab_id as usize).unwrap().text, "huls");
+    assert!( results.get(0).unwrap().dist_score > results.get(1).unwrap().dist_score, "score of huis should be greater than that of huls" );
 }
 
 #[test]
@@ -705,10 +706,10 @@ fn test0503_confusable_test2() {
     }
     model.add_to_confusables("-[y]+[i]",1.1).expect("added to confusables");
     model.build();
-    let results = model.find_variants("Huys", &get_test_searchparams(), None);
-    assert_eq!( model.decoder.get(results.get(0).unwrap().0 as usize).unwrap().text, "huis");
-    assert_eq!( model.decoder.get(results.get(1).unwrap().0 as usize).unwrap().text, "huls");
-    assert!( results.get(0).unwrap().1 > results.get(1).unwrap().1, "score of huis should be greater than that of huls" );
+    let results = model.find_variants("Huys", &get_test_searchparams());
+    assert_eq!( model.decoder.get(results.get(0).unwrap().vocab_id as usize).unwrap().text, "huis");
+    assert_eq!( model.decoder.get(results.get(1).unwrap().vocab_id as usize).unwrap().text, "huls");
+    assert!( results.get(0).unwrap().dist_score > results.get(1).unwrap().dist_score, "score of huis should be greater than that of huls" );
 }
 
 #[test]
@@ -721,9 +722,9 @@ fn test0504_confusable_nomatch() {
     }
     model.add_to_confusables("-[y]+[p]",1.1).expect("added to confusables");
     model.build();
-    let results = model.find_variants("Huys", &get_test_searchparams(), None);
+    let results = model.find_variants("Huys", &get_test_searchparams());
     assert_eq!( results.len() , 2 );
-    assert_eq!( results.get(0).unwrap().1,results.get(1).unwrap().1, "score of huis should be equal to that of huls" );
+    assert_eq!( results.get(0).unwrap().dist_score,results.get(1).unwrap().dist_score, "score of huis should be equal to that of huls" );
 }
 
 #[test]
@@ -978,22 +979,21 @@ fn test0705_find_all_matches_context_only() {
 
 
 
+
 #[test]
-fn test0801_model_variants() {
+fn test0801_expand_variants() {
     let (alphabet, _alphabet_size) = get_test_alphabet();
-    let mut model = VariantModel::new_with_alphabet(alphabet, Weights::default(), 2);
-    let lexicon: &[&str] = &["rites","tiers", "tires","tries","tyres","rides","brides","dire"];
-    for text in lexicon.iter() {
-        model.add_to_vocabulary(text,None,&VocabParams::default());
-    }
-    model.add_variants(&vec!("tries", "attempts"), &VocabParams::default().with_vocab_type(VocabType::TRANSPARENT | VocabType::INDEXED));
+    let mut model = VariantModel::new_with_alphabet(alphabet, Weights::default(), 3);
+    let vocab_id = model.add_to_vocabulary("afgescheid",None,&VocabParams::default());
+    model.add_variant(vocab_id, "afghescheydt", 1.0,  None, &VocabParams::default().with_vocab_type(VocabType::INDEXED | VocabType::TRANSPARENT));
     model.build();
-    assert!(model.has(&"tries"));
-    assert!(model.has(&"attempts"));
-    //we look for "attemts", which matches "attempts", but this is just an intermediate towards
-    //"tries", which is what is eventually returned.
-    let results = model.find_variants("attemts", &get_test_searchparams(), None);
-    assert_eq!( model.decoder.get(results.get(0).unwrap().0 as usize).unwrap().text, "tries");
+    let mut searchparams = get_test_searchparams();
+    //set very strict parameters so the original key can't match but the transparent variant can
+    searchparams.max_anagram_distance = DistanceThreshold::Absolute(2);
+    searchparams.max_edit_distance = DistanceThreshold::Absolute(2);
+    let results = model.find_variants("afgheschaydt", &searchparams);
+    assert_eq!( results.len() , 1 );
+    assert_eq!( model.decoder.get(results.get(0).unwrap().vocab_id as usize).unwrap().text, "afgescheid");
 }
 
 #[test]
@@ -1038,18 +1038,3 @@ fn test0901_find_all_matches_with_multiple_lexicons() {
 
 }
 
-#[test]
-fn test1001_errorlist() {
-    let (alphabet, _alphabet_size) = get_test_alphabet();
-    let mut model = VariantModel::new_with_alphabet(alphabet, Weights::default(), 2);
-    let vocab_id = model.add_to_vocabulary("afgescheid",None,&VocabParams::default());
-    model.add_weighted_variant(vocab_id, "afghescheydt", 1.0,  None, &VocabParams::default().with_vocab_type(VocabType::INDEXED | VocabType::TRANSPARENT));
-    model.build();
-    let mut searchparams = get_test_searchparams();
-    //set very strict parameters so the original key can't match but the transparent variant can
-    searchparams.max_anagram_distance = DistanceThreshold::Absolute(1);
-    searchparams.max_edit_distance = DistanceThreshold::Absolute(1);
-    let results = model.find_variants("afgheschaydt", &searchparams, None);
-    assert_eq!( results.len() , 1 );
-    assert_eq!( model.decoder.get(results.get(0).unwrap().0 as usize).unwrap().text, "afgescheid");
-}

@@ -1,8 +1,8 @@
 use ibig::UBig;
-use std::collections::HashMap;
 use std::str::FromStr;
 use std::io::Error;
 use std::io::ErrorKind;
+use std::cmp::Ordering;
 use std::fmt;
 
 ///Each type gets assigned an ID integer, carries no further meaning
@@ -246,10 +246,6 @@ pub struct Distance {
 
     ///Is the casing different or not?
     pub samecase: bool,
-
-    ///Some variants may be pre-scored already if they were found in an explicit variant list, the
-    ///prescore component will be as a component in computing the final csore
-    pub prescore: Option<f64>,
 }
 
 #[derive(Debug,Clone,Copy,PartialEq)]
@@ -260,15 +256,60 @@ pub enum StopCriterion {
     StopAtExactMatch,
 }
 
-pub type VariantClusterId = u32;
-
 #[derive(Debug,Clone,PartialEq,PartialOrd)]
 pub enum VariantReference {
-    VariantCluster(VariantClusterId),
-    WeightedVariant((VocabId, f64))
+    ///The current item is a reference for a variant. The score expressed similarity from the
+    ///variant to the reference.
+    ReferenceFor((VocabId, f64)),
+
+    ///The current item is a variant of a reference item. The score expressed similarity from the
+    ///variant to the reference.
+    VariantOf((VocabId, f64))
 }
 
-pub type VariantClusterMap = HashMap<VariantClusterId, Vec<VocabId>>;
+#[derive(Debug,Clone,PartialEq)]
+pub struct VariantResult {
+    pub vocab_id: VocabId,
+    pub dist_score: f64,
+    pub freq_score: f64,
+    pub via: Option<VocabId>
+}
+
+impl VariantResult {
+    pub fn score(&self, freq_weight: f32) -> f64 {
+        if freq_weight == 0.0 {
+            self.dist_score
+        } else {
+            (self.dist_score + (freq_weight as f64 * self.dist_score)) / (1.0+freq_weight as f64)
+        }
+    }
+
+    /// Custom comparison function for ranking, takes an extra freq_weight parameter
+    pub fn rank_cmp(&self, other: &Self, freq_weight: f32) -> Option<Ordering> {
+        if freq_weight > 0.0 {
+            other.score(freq_weight).partial_cmp(&self.score(freq_weight)) //reverse parameters because we want decreasing order
+        } else {
+            if self.dist_score > other.dist_score {
+                Some(Ordering::Less) //opposite because we want decreasing order
+            } else if self.dist_score < other.dist_score {
+                Some(Ordering::Greater)
+            } else {
+                //when tied, fall back to frequency score
+                if self.freq_score > other.freq_score {
+                    Some(Ordering::Less)
+                } else if self.freq_score < other.freq_score {
+                    Some(Ordering::Greater)
+                } else {
+                    Some(Ordering::Equal)
+                }
+            }
+        }
+    }
+}
+
+
+
+
 
 ///A simple lower-order n-gram type that does not require heap allocation
 #[derive(Clone,Hash,PartialEq,Eq,PartialOrd)]
