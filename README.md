@@ -17,7 +17,7 @@ quick lookups possible even over larger edit distances. The underlying idea is l
 (Reynaert 2010; Reynaert 2004), which was implemented in [ticcltools](https://github.com/languagemachines/ticcltools).
 This *analiticcl* implementation attempts to re-implement the core of these ideas from scratch, but also introduces some
 novelties, such as the introduction of prime factors for improved anagram hashing. We aim at a high-performant
-lightweight implementation written in [Rust](https://www.rust-lang.org).
+implementation written in [Rust](https://www.rust-lang.org).
 
 ## Features
 
@@ -32,9 +32,9 @@ lightweight implementation written in [Rust](https://www.rust-lang.org).
     * Damerau-Levenshtein
     * Longest common substring
     * Longest common prefix/suffix
-    * Frequency information
-    * Lexicon weight, usually binary (validated or not)
     * Casing difference (boolean)
+  An exact match always has distance score 1.0.
+* Additionally, frequency information can be used to influence ranking.
 * A confusable list with known confusable patterns and weights can be provided. This is used to favour or penalize certain
   confusables in the ranking stage (this weight is applied to the whole score).
 * Rather than look up words in spelling-correction style, users may also output the entire hashed anagram index, or
@@ -76,6 +76,8 @@ Analiticcl can be run in several **modes**, each is invoked through a subcommand
 * **Search mode** - ``analiticcl search`` - Searches for variants in running text. This encompasses detection and correction whereas the above query mode only handles correction.
 * **Index mode** - ``analiticcl index`` - Computes and outputs the anagram index, takes no further input
 * **Learn mode** - ``analiticcl learn`` - Learns variants from the input for each item in the lexicon and outputs a weighted variant list.
+
+In all modes, the performance of the system depends to a large depree on the quality of the lexicons, including the **background lexicon**, the importance of which can not be understated so we dedicate a special section to it later, and the chosen parameters.
 
 ### Query Mode
 
@@ -120,11 +122,10 @@ $ analiticcl query --lexicon examples/eng.aspell.lexicon --alphabet examples/sim
 output.tsv
 ```
 
-The ``--lexicon`` argument can be specified multiple times for multiple lexicons. When you want to use a corpus-derived
-lexicon, use ``--corpus`` instead (can be used multiple times too). The difference affects only the scoring where
-items from a validated lexicon will be esteemed higher than those from a background corpus. Both types of lexicons may
-contain frequency information (will be used by default when present). In case you are using multiple lexicons, you can
-get analiticcl to output information on which lexicon a match was found in by setting. ``--output-lexmatch``.
+The ``--lexicon`` argument can be specified multiple times for multiple lexicons. Lexicons may
+contain absolute frequency information, but frequencies between multiple lexicons must be balanced! In case you are using multiple lexicons, you can
+get analiticcl to output information on which lexicon a match was found in by setting. ``--output-lexmatch``. The order
+of the lexicons matters; if multiple lexicons contain the same entry, only the first lexicon is returned as a match.
 
 If you want JSON output rather than TSV, use the ``--json`` flag.
 
@@ -168,18 +169,31 @@ The large number is the [anagram value](#theoretical-background) of the anagram.
 
 ### Learn Mode
 
-In learn mode, analiticcl takes input similar like in query mode, but rather than output the results directly, it associates the variants found with the items in the lexicon and updates the model with this information. The output this mode provides is effectively the inverse of what query does; for each item in the lexicon, all variants that were found (and their scores are listed). This output constitutes a weighted variant list which can be loaded in again using ``--weighted-variants``.
+In learn mode, analiticcl takes input similar like in query mode, but rather than output the results directly, it
+associates the variants found with the items in the lexicon and updates the model with this information. The output this
+mode provides is effectively the inverse of what query does; for each item in the lexicon, all variants that were found
+(and their scores are listed). This output constitutes a weighted variant list which can be loaded in again using
+``--weighted-variants``.
 
-The learned variants are used as intermediate words to guide the system towards a desired solution. Assume for instance that our lexicon contains the word ``separate``, and we found the variant ``seperate`` in the data during learning. This variant is now associated with the right reference, and on subsequent runs matches against ``seperate`` will count towards matches on ``separate``. This mechanism allows the system to bridge larger edit distances even when it is contrained to smaller ones. For example: ``seperete`` will match against ``seperate`` but not ``separate`` when the edit/anagram distance is constrained to 1.
+The learned variants are used as intermediate words to guide the system towards a desired solution. Assume for instance
+that our lexicon contains the word ``separate``, and we found the variant ``seperate`` in the data during learning. This
+variant is now associated with the right reference, and on subsequent runs matches against ``seperate`` will count
+towards matches on ``separate``. This mechanism allows the system to bridge larger edit distances even when it is
+contrained to smaller ones. For example: ``seperete`` will match against ``seperate`` but not ``separate`` when the
+edit/anagram distance is constrained to 1.
 
-Learn mode may do multiple iterations over the same data (set ``--iterations``). As iterations grow, larger edit distances can be covered, but this is also a source for extra noise so accuracy will go down too.
+Learn mode may do multiple iterations over the same data (set ``--iterations``). As iterations grow, larger edit
+distances can be covered, but this is also a source for extra noise so accuracy will go down too.
 
 When using learn mode, make sure to choose tight constraints (e.g. ``--max-matches 1`` and a high
 ``--score-threshold``).
 
 ### Search Mode
 
-In query mode you provide an exact input string and ask Analiticcl to correct it as a single unit. Query mode effectively implements the *correction* part of a spelling-correction system, but does not really handle the *detection* aspect. This is where *search mode* comes in. In search mode you can provide running text as input and the system will automatically attempt to detect the parts of your input that can corrected, and give the suggestions for correction.
+In query mode you provide an exact input string and ask Analiticcl to correct it as a single unit. Query mode
+effectively implements the *correction* part of a spelling-correction system, but does not really handle the *detection*
+aspect. This is where *search mode* comes in. In search mode you can provide running text as input and the system will
+automatically attempt to detect the parts of your input that can corrected, and give the suggestions for correction.
 
 In the output, Analiticcl will return UTF-8 byte offsets for fragments in your data that it finds variants for. Your
 input does not have to be tokenised, because tokenisation errors in the input may in itself account for variation which
@@ -188,9 +202,50 @@ context-aware. You can use the ``--max-ngram-order`` parameter to set the maximu
 setting above 1 enables a language modelling component in Analiticcl, which requires a frequency list of n-grams as
 input (using ``--lm``).
 
+### Background Lexicon
+
+We can not understate the importance of the background lexicon to reduce false positives. Analiticcl will eagerly
+attempt to match your test input to whatever lexicons you provide. This demands a certain degree of completeness in your
+lexicons. If your lexicon contains a relatively rare word like "boulder" and not a more common word like "builder", then
+analiticcl will happily suggest all instantes of "builder" to be "boulder". The risk for this increases as the allowed
+edit distances increase.
+
+Such background lexicons should also contain morphological variants and not just lemma. Ideally it is derived automatically from a fully spell-checked corpus.
+
+Analiticcl **will not** work for you if you just feed it some small lexicons and no complete enough background lexicons, unless you are sure your test texts have a very constrained limited vocabulary.
+
+### Scores and ranking
+
+In query mode, analiticcl will return a similarity/distance score between your input and any matching variants. This
+score is expressed on a scale of 1.0 (exact match) to 0.0. The score takes the length of the input into account, so a
+levenshtein difference of 2 on a word weighs less than a levenshtein distance of 2 on a shorter word. The distance score
+itself is consists of multiple components, each with a weight:
+
+* Damerau-Levenshtein
+* Longest common substring
+* Longest common prefix
+* Longest common suffix
+* Casing difference (boolean)
+
+A frequency score on a scale of 1.0 (most frequent variant) to 0.0 is returned separately (not shown in TSV output).
+By default, the ranking of variants is based primarily on the distance score, the frequency score is only used as a
+secondary key in case their is a tie (multiple items with the same distance score).
+
+If you do want frequency information to play a larger role in the ranking of variants, you can use the ``--freq-ranking`` parameter, the value of
+which is a weight to attribute to frequency ranking in relation to the distance component and should be in the range 0.0
+to 1.0, where a smaller value around 0.25 is recommended. This is used to compute a ranking score as follows:
+
+```
+ranking_score = (distance_score + freq_weight * freq_score) / (1 + freq_weight)
+```
+
+This ranking score is subsequently used to rank the results. This may result in a variant with less similarity to the
+input being preferred over a variant with more similarity to the input, if that first variant is far more frequent.
+
 ## Data Formats
 
-All input for analiticcl must be UTF-8 encoded and use unix-style line endings.
+All input for analiticcl must be UTF-8 encoded and use unix-style line endings, NFC unicode normalisation is strongly
+recommended.
 
 ### Alphabet File
 
@@ -233,17 +288,64 @@ file.
 
 ### Lexicon File
 
-The lexicon is a TSV file (tab separated fields) containing either validated words (``--lexicon``) or corpus-derived
-words (``--corpus``), one lexicon entry per line. The first column typically (this is configurable) contains the word
+The lexicon is a TSV file (tab separated fields) containing either validated or corpus-derived
+words or phrases, one lexicon entry per line. The first column typically (this is configurable) contains the word
 and the optional second column contains the absolute frequency count. If no frequency information is available, all
 items in the lexicon carry the exact same weight.
 
 Multiple lexicons may be passed and analiticcl will remember which lexicon was matched against, so you could use this
-information for some simple tagging.
+information for some simple tagging. Order matter here, only the first match is returned.
+
+### Variant List
+
+A variant lists explicitly relate spelling variants, and in doing so go a step further than a simple lexicon which only
+specifies the validated or corpus-derived form. There are two types:
+
+#### Unweighted variant list
+
+An unweighted variant list is *undirected*, all words are considered equally valid variant. They are provided in a
+simple TSV file with variants on a line, seperated by a tab. A variant list can be provided to analiticcl using the
+``--variants`` option.
+
+#### Weighted variant list
+
+A weighted variant list is *directed*, it specifies an normalised/preferred form first, and then specifies variants and
+variant scores. Take the following example (all fields are tab separated):
+
+```
+huis	huys	1.0	huijs	1.0
+```
+This states that the preferred word *huis* has two variants (historical spelling in this case), and both have a score
+(0-1) that expresses how likely the variant maps to the preferred word. When loaded into analiticcl with
+``--weighted-variants``, both the preferred form and the variants will be valid results in normalization (as if you
+loaded a lexicon with all three words in it).
+
+What you might be more interested in, is a special flavour of the weighted variant list called an *error list*, loaded
+into analiticcl using ``--errors``. Consider the following example:
+
+```
+separate	seperate	1.0	seperete 1.0
+```
+This states that the preferred word ``seperate`` has two variants that are considered errors. In this case, analiticcl will still match against the variants but
+but they will not be returned as a solution; the preferred variant will be returned as a solution instead. This
+mechanism helps bridge larger edit distances.
+
+A weighted variant list may also contain an extra column of absolute frequencies, provided that it's consistently
+provided for *all* references and variants:
+
+```
+separate	531	seperate	1.0	4	seperete 1.0	1
+```
+
+Here the reference occurs 531 times, the first misspelling 4 times, and the last variant only 1 time.
+
+Analiticcl can also *output* weighted variant lists, given input lexicons and a text to train on, this occurs when you run it in *learn mode*.
 
 ### Confusable List
 
-The confusable list is a TSV file (tab separated fields) containing known confusable patterns and weights to assign to these patterns when they are found. The file contains one confusable pattern per line. The patterns are expressed in the edit script language of [sesdiff](https://github.com/proycon/sesdiff). Consider the following example:
+The confusable list is a TSV file (tab separated fields) containing known confusable patterns and weights to assign to
+these patterns when they are found. The file contains one confusable pattern per line. The patterns are expressed in the
+edit script language of [sesdiff](https://github.com/proycon/sesdiff). Consider the following example:
 
 ```
 -[y]+[i]	1.1
@@ -266,10 +368,29 @@ which only matches the substituion when it comes after a ``c`` or a ``k``:
 To force matches on the beginning or end, start or end the pattern with respectively a  ``^`` or a ``$``. A further description of the edit script language
 can be found in the [sesdiff](https://github.com/proycon/sesdiff) documentation.
 
+### Language Model
+
+In order to consider context information, analiticcl can construct a simple language model. The input for this language
+model is an n-gram frequency list, provided through the ``--lm`` parameter. It is used in analiticcl's *search mode*.
+
+This should be a corpus-derived list of unigrams and bigrams, optionally also trigrams (and even all up to quintgrams if
+needed, higher-order ngrams are not supported though).  This is a TSV file containing the the ngram in the first column
+(space character acts as token separator), and the absolute frequency count in the second column. It is also recommended
+it contains the special tokens ``<bos>`` (begin of sentence) and ``<eos>`` end of sentence. The items in this list are
+**NOT** used for variant matching, use ``--lexicon`` instead if you want to also match against
+these items. It is fine to have an entry in both the language model and lexicon, analiticcl will store it only once
+internally.
+
+
 ## Theoretical Background
 
-A naive approach to find variants would be to compute the edit distance between the input string and all ``n`` items in the
-lexicon. This, however, is prohibitively expensive (``O(mn)``) when ``m`` input items need to be compared. Anagram hashing (Reynaert 2010; Reynaert 2004) aims to drastically reduce the variant search space. For all items in the lexicon, an order-independent **anagram value** is computed over all characters that make up the item. All words with the same set of characters (allowing for duplicates) obtain an identical anagram value. This value is subsequently used as a hash in a hash table that maps each anagram value to all variant instances. This is effectively what is outputted when running ``analiticcl index``.
+A naive approach to find variants would be to compute the edit distance between the input string and all ``n`` items in
+the lexicon. This, however, is prohibitively expensive (``O(mn)``) when ``m`` input items need to be compared. Anagram
+hashing (Reynaert 2010; Reynaert 2004) aims to drastically reduce the variant search space. For all items in the
+lexicon, an order-independent **anagram value** is computed over all characters that make up the item. All words with
+the same set of characters (allowing for duplicates) obtain an identical anagram value. This value is subsequently used
+as a hash in a hash table that maps each anagram value to all variant instances. This is effectively what is outputted
+when running ``analiticcl index``.
 
 Unlike earlier work, Analiticcl uses prime factors for computation of anagram values. Each character in the alphabet
 gets assigned a prime number (e.g. a=2, b=3, c=5, d=7, e=11) and the product of these forms the anagram value. This
@@ -303,10 +424,9 @@ The properties of the anagram values facilitate a much quicker lookup, when give
         * Damerau-Levenshtein
         * Longest common substring
         * Longest common prefix/suffix
-        * Frequency information
-        * Lexicon weight, usually binary (validated or not)
         * Casing difference (binary, different case or not)
-    * A score is computed that is an expression of a weighted linear combination of the above items (the actual weights are configurable)
+    * A score is computed that is an expression of a weighted linear combination of the above items (the actual weights
+        are configurable). An exact match always has score 1.0.
     * A cut-off value prunes the list of candidates that score too low (the parameter ``-n`` expresses how many variants
         we want)
     * Optionally, if a confusable list was provided, we compute the edit script between the input and each variant, and

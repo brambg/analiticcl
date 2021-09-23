@@ -1,5 +1,9 @@
 use ibig::UBig;
 use std::collections::HashMap;
+use std::str::FromStr;
+use std::io::Error;
+use std::io::ErrorKind;
+use std::fmt;
 
 ///Each type gets assigned an ID integer, carries no further meaning
 pub type VocabId = u64;
@@ -26,40 +30,60 @@ pub type Alphabet = Vec<Vec<String>>;
 pub struct Weights {
     pub ld: f64,
     pub lcs: f64,
-    pub freq: f64,
     pub prefix: f64,
     pub suffix: f64,
-    pub lex: f64,
     pub case: f64,
 }
 
 impl Default for Weights {
    fn default() -> Self {
        Self {
-           ld: 1.0,
-           lcs: 1.0,
-           freq: 1.0,
-           prefix: 1.0,
-           suffix: 1.0,
-           lex: 1.0,
-           case: 0.2,
+           ld: 0.5,
+           lcs: 0.125,
+           prefix: 0.125,
+           suffix: 0.125,
+           case: 0.125,
         }
    }
 }
 
 impl Weights {
     pub fn sum(&self) -> f64 {
-        self.ld + self.lcs + self.freq + self.prefix + self.suffix + self.lex + self.case
+        self.ld + self.lcs + self.prefix + self.suffix + self.case
     }
 }
 
+#[derive(Clone,Copy,Debug)]
+pub enum DistanceThreshold {
+    ///The distance threshold is expressed as a ratio of the total length of the text fragment under consideration, should be in range 0-1
+    Ratio(f32),
+    ///Absolute distance threshold
+    Absolute(u8)
+}
+
+impl FromStr for DistanceThreshold {
+    type Err = std::io::Error;
+
+    fn from_str(s: &str) -> Result<Self, std::io::Error> {
+        if let Ok(num) = s.parse::<u8>() {
+            return Ok(Self::Absolute(num));
+        } else if let Ok(num) = s.parse::<f32>() {
+            if num >= 0.0 && num <= 1.0 {
+                return Ok(Self::Ratio(num))
+            }
+        }
+        Err(Error::new(ErrorKind::InvalidInput, "Input must be integer (absolute threshold) or float between 0.0 and 1.0 (ratio)"))
+    }
+}
+
+
 #[derive(Clone,Debug)]
 pub struct SearchParameters {
-    /// Maximum edit distance (levenshtein-damarau). The maximum edit distance according to Levenshtein-Damarau. Insertions, deletions, substitutions and transposition all have the same cost (1). It is recommended to set this value slightly lower than the maximum anagram distance
-    pub max_anagram_distance: u8,
+    /// Maximum anagram distance. The difference in characters (regardless of order)
+    pub max_anagram_distance: DistanceThreshold,
 
     /// Maximum edit distance (levenshtein-damarau). The maximum edit distance according to Levenshtein-Damarau. Insertions, deletions, substitutions and transposition all have the same cost (1). It is recommended to set this value slightly lower than the maximum anagram distance.
-    pub max_edit_distance: u8,
+    pub max_edit_distance: DistanceThreshold,
 
     /// Number of matches to return per input (set to 0 for unlimited if you want to exhaustively return every possibility within the specified anagram and edit distance)
     pub max_matches: usize,
@@ -74,8 +98,11 @@ pub struct SearchParameters {
     /// cost of lower accuracy
     pub stop_criterion: StopCriterion,
 
-    /// Maximum ngram order (1 for unigrams, 2 for bigrams, etc..). This also requires you to load actual ngram frequency lists to have any effect.
+    /// Maximum ngram order (1 for unigrams, 2 for bigrams, etc..).
     pub max_ngram: u8,
+
+    /// Maximum ngram order for Language Models (2 for bigrams, etc..).
+    pub lm_order: u8,
 
     /// Maximum number of candidate sequences to take along to the language modelling stage
     pub max_seq: usize,
@@ -84,36 +111,71 @@ pub struct SearchParameters {
     /// performance)
     pub single_thread: bool,
 
-    /// Weight attributed to the language model
+    /// Weight attributed to the language model in relation to the variant model (e.g. 2.0 = twice
+    /// as much weight) when considering input context and rescoring.
+    pub context_weight: f32,
+
+    /// Weight attributed to the language model in finding the most likely sequence
     pub lm_weight: f32,
-    /// Weight attributed to the variant model
-    pub variantmodel_weight: f32
+
+    /// Weight attributed to the frequency information in frequency reranking, in relation to
+    /// the similarity component. 0 = disabled)
+    pub freq_weight: f32,
+
+    /// Weight attributed to the variant model in finding the most likely sequence
+    pub variantmodel_weight: f32,
+
+    /// Consolidate matches and extract a single most likely sequence, if set
+    /// to false, all possible matches (including overlapping ones) are returned.
+    pub consolidate_matches: bool
 }
 
 impl Default for SearchParameters {
     fn default() -> Self {
         Self {
-            max_anagram_distance: 3,
-            max_edit_distance: 3,
+            max_anagram_distance: DistanceThreshold::Absolute(3),
+            max_edit_distance: DistanceThreshold::Absolute(3),
             max_matches: 20,
             score_threshold: 0.25,
             cutoff_threshold: 2.0,
             stop_criterion: StopCriterion::Exhaustive,
-            max_ngram: 2,
+            max_ngram: 3,
+            lm_order: 3,
             single_thread: false,
             max_seq: 250,
+            context_weight: 0.0,
             lm_weight: 1.0,
+            freq_weight: 0.0,
             variantmodel_weight: 1.0,
+            consolidate_matches: true,
         }
     }
 }
 
+impl fmt::Display for SearchParameters {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        writeln!(f," max_anagram_distance={:?}",self.max_anagram_distance)?;
+        writeln!(f," max_edit_distance={:?}",self.max_edit_distance)?;
+        writeln!(f," max_matches={}",self.max_matches)?;
+        writeln!(f," score_threshold={}",self.score_threshold)?;
+        writeln!(f," cutoff_threshold={}",self.cutoff_threshold)?;
+        writeln!(f," max_ngram={}",self.max_ngram)?;
+        writeln!(f," lm_order={}",self.lm_order)?;
+        writeln!(f," single_thread={}",self.single_thread)?;
+        writeln!(f," max_seq={}",self.max_seq)?;
+        writeln!(f," freq_weight={}",self.freq_weight)?;
+        writeln!(f," lm_weight={}",self.lm_weight)?;
+        writeln!(f," variantmodel_weight={}",self.variantmodel_weight)?;
+        writeln!(f," consolidate_matches={}",self.consolidate_matches)
+    }
+}
+
 impl SearchParameters {
-    pub fn with_edit_distance(mut self, distance: u8) -> Self {
+    pub fn with_edit_distance(mut self, distance: DistanceThreshold) -> Self {
         self.max_edit_distance = distance;
         self
     }
-    pub fn with_anagram_distance(mut self, distance: u8) -> Self {
+    pub fn with_anagram_distance(mut self, distance: DistanceThreshold) -> Self {
         self.max_anagram_distance = distance;
         self
     }
@@ -145,12 +207,24 @@ impl SearchParameters {
         self.single_thread = true;
         self
     }
+    pub fn with_context_weight(mut self, weight: f32) -> Self {
+        self.context_weight = weight;
+        self
+    }
     pub fn with_lm_weight(mut self, weight: f32) -> Self {
         self.lm_weight = weight;
         self
     }
+    pub fn with_lm_order(mut self, order: u8) -> Self {
+        self.lm_order = order;
+        self
+    }
     pub fn with_variantmodel_weight(mut self, weight: f32) -> Self {
         self.variantmodel_weight = weight;
+        self
+    }
+    pub fn with_consolidate_matches(mut self, value: bool) -> Self {
+        self.consolidate_matches = value;
         self
     }
 }
@@ -170,13 +244,6 @@ pub struct Distance {
     ///Common suffix length
     pub suffixlen: u16,
 
-    ///Absolute frequency count
-    pub freq: u32,
-
-    ///Lexicon weight (usually simply 1.0 if an item is in a validated lexicon, and 0.0 if in a
-    ///background corpus)
-    pub lex: f32,
-
     ///Is the casing different or not?
     pub samecase: bool,
 
@@ -190,16 +257,7 @@ pub enum StopCriterion {
     Exhaustive,
 
     /// Stop when we find an exact match with a lexical weight higher or equal than the specified value here
-    StopAtExactMatch(f32),
-}
-
-impl StopCriterion {
-    pub fn stop_at_exact_match(&self) -> bool {
-        match self {
-            Self::StopAtExactMatch(_)  => true,
-            _ => false
-        }
-    }
+    StopAtExactMatch,
 }
 
 pub type VariantClusterId = u32;
@@ -219,6 +277,8 @@ pub enum NGram {
     UniGram(VocabId),
     BiGram(VocabId, VocabId),
     TriGram(VocabId, VocabId, VocabId),
+    QuadGram(VocabId, VocabId, VocabId, VocabId),
+    QuintGram(VocabId, VocabId, VocabId, VocabId, VocabId),
 }
 
 impl NGram {
@@ -228,7 +288,9 @@ impl NGram {
             1 => Ok(NGram::UniGram(v[0])),
             2 => Ok(NGram::BiGram(v[0],v[1])),
             3 => Ok(NGram::TriGram(v[0],v[1],v[2])),
-            _ => Err("Only supporting unigrams, bigrams and trigrams")
+            4 => Ok(NGram::QuadGram(v[0],v[1],v[2],v[3])),
+            5 => Ok(NGram::QuintGram(v[0],v[1],v[2],v[3],v[4])),
+            _ => Err("Only supporting at most 5-grams")
         }
     }
 
@@ -238,7 +300,9 @@ impl NGram {
             [Some(a)] => Ok(NGram::UniGram(*a)),
             [Some(a),Some(b)] => Ok(NGram::BiGram(*a,*b)),
             [Some(a),Some(b),Some(c)] => Ok(NGram::TriGram(*a,*b,*c)),
-            _ => Err("Only supporting unigrams, bigrams and trigrams")
+            [Some(a),Some(b),Some(c),Some(d)] => Ok(NGram::QuadGram(*a,*b,*c,*d)),
+            [Some(a),Some(b),Some(c),Some(d),Some(e)] => Ok(NGram::QuintGram(*a,*b,*c,*d,*e)),
+            _ => Err("Only supporting at most 5-grams")
         }
     }
 
@@ -255,6 +319,12 @@ impl NGram {
             },
             NGram::TriGram(x,y,z) => {
                 vec!(x,y,z)
+            },
+            NGram::QuadGram(a,b,c,d) => {
+                vec!(a,b,c,d)
+            },
+            NGram::QuintGram(a,b,c,d,e) => {
+                vec!(a,b,c,d,e)
             }
         }
     }
@@ -269,6 +339,8 @@ impl NGram {
             NGram::UniGram(_) => 1,
             NGram::BiGram(..) => 2,
             NGram::TriGram(..) => 3,
+            NGram::QuadGram(..) => 4,
+            NGram::QuintGram(..) => 5,
         }
     }
 
@@ -285,7 +357,15 @@ impl NGram {
             NGram::BiGram(x,y) => {
                 *self = NGram::TriGram(x,y, item);
                 true
-            }
+            },
+            NGram::TriGram(x,y,z) => {
+                *self = NGram::QuadGram(x,y,z, item);
+                true
+            },
+            NGram::QuadGram(a,b,c,d) => {
+                *self = NGram::QuintGram(a,b,c,d, item);
+                true
+            },
             _ => false
         }
     }
@@ -295,7 +375,7 @@ impl NGram {
             NGram::Empty => {
                 None
             },
-            NGram::UniGram(x) | NGram::BiGram(x,_) | NGram::TriGram(x,_,_) => {
+            NGram::UniGram(x) | NGram::BiGram(x,_) | NGram::TriGram(x,_,_) | NGram::QuadGram(x,_,_,_) | NGram::QuintGram(x,_,_,_,_) => {
                 Some(x)
             }
         }
@@ -313,11 +393,19 @@ impl NGram {
             NGram::BiGram(x,y) => {
                 *self = NGram::UniGram(y);
                 NGram::UniGram(x)
-            }
+            },
             NGram::TriGram(x,y,z) => {
                 *self = NGram::BiGram(y,z);
                 NGram::UniGram(x)
-            }
+            },
+            NGram::QuadGram(a,b,c,d) => {
+                *self = NGram::TriGram(b,c,d);
+                NGram::UniGram(a)
+            },
+            NGram::QuintGram(a,b,c,d,e) => {
+                *self = NGram::QuadGram(b,c,d,e);
+                NGram::UniGram(a)
+            },
         }
     }
 
@@ -333,11 +421,19 @@ impl NGram {
             NGram::BiGram(x,y) => {
                 *self = NGram::UniGram(x);
                 NGram::UniGram(y)
-            }
+            },
             NGram::TriGram(x,y,z) => {
                 *self = NGram::BiGram(x,y);
                 NGram::UniGram(z)
-            }
+            },
+            NGram::QuadGram(a,b,c,d) => {
+                *self = NGram::TriGram(a,b,c);
+                NGram::UniGram(d)
+            },
+            NGram::QuintGram(a,b,c,d,e) => {
+                *self = NGram::QuadGram(a,b,c,d);
+                NGram::UniGram(e)
+            },
         }
     }
 }

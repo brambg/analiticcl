@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use bitflags::bitflags;
 
 use crate::types::*;
 
@@ -15,10 +16,6 @@ pub struct VocabValue {
     /// The number of words
     pub tokencount: u8,
 
-    /// The weight assigned by the lexicon as a whole
-    /// (usually 1.0 for validated lexicons and 0.0 for backgrond corpora)
-    pub lexweight: f32,
-
     /// The first lexicon index which matches
     pub lexindex: u8,
 
@@ -30,19 +27,34 @@ pub struct VocabValue {
     pub vocabtype: VocabType,
 }
 
-#[derive(Clone,Copy,Debug,PartialEq,Eq)]
-pub enum VocabType {
-    /// A normal vocabulary entry
-    Normal,
+bitflags! {
+    pub struct VocabType: u8 {
+        /// Indexed for variant matching
+        const NONE = 0b00000000;
 
-    /// Marks this entry as intermediate; intermediate entries will only be used to find further explicitly provided variants
-    /// and will never be returned as a solution by itself. For example, all erroneous variants in
-    /// an errorlist are marked as intermediate.
-    Intermediate,
+        /// Indexed for variant matching
+        const INDEXED = 0b00000001;
 
-    /// Reserved for items that will not be added to the index at all
-    /// for language-model entries and for special tokens like BeginOfSentence, EndOfSentence
-    NoIndex,
+        /// Used for Language Modelling
+        const LM = 0b00000010;
+
+        /// Marks this entry as transparent; transparent entries will only be used to find further explicitly provided variants
+        /// and will never be returned as a solution by itself. For example, all erroneous variants in
+        /// an errorlist are marked as intermediate.
+        const TRANSPARENT = 0b00000100;
+    }
+}
+
+impl VocabType {
+    pub fn check(&self, test: VocabType) -> bool {
+        *self & test == test
+    }
+}
+
+impl From<VocabType> for bool {
+    fn from(v: VocabType) -> bool {
+        v != VocabType::NONE
+    }
 }
 
 impl VocabValue {
@@ -53,7 +65,6 @@ impl VocabValue {
             norm: Vec::new(),
             frequency: 1, //smoothing
             tokencount,
-            lexweight: 0.0,
             lexindex: 0,
             variants: None,
             vocabtype,
@@ -69,7 +80,6 @@ pub type VocabDecoder = Vec<VocabValue>;
 pub type VocabEncoder = HashMap<String, VocabId>;
 
 ///Frequency handling in case of duplicate items (may be across multiple lexicons), the
-///``*IfMoreWeight`` variants only apply when the item to be added has a higher lexicon weight
 ///associated with it.
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
 pub enum FrequencyHandling {
@@ -77,10 +87,6 @@ pub enum FrequencyHandling {
     Max,
     Min,
     Replace,
-    SumIfMoreWeight,
-    MaxIfMoreWeight,
-    MinIfMoreWeight,
-    ReplaceIfMoreWeight,
 }
 
 #[derive(Clone,Debug)]
@@ -92,11 +98,10 @@ pub struct VocabParams {
     ///Frequency handling in case of duplicate items (may be across multiple lexicons)
     pub freq_handling: FrequencyHandling,
     pub vocab_type: VocabType,
-    /// Lexicon weight
-    pub weight: f32,
     /// Lexicon index
     pub index: u8,
 }
+
 
 impl Default for VocabParams {
     fn default() -> Self {
@@ -104,18 +109,14 @@ impl Default for VocabParams {
             text_column: 0,
             freq_column: Some(1),
             freq_handling: FrequencyHandling::Max,
-            vocab_type: VocabType::Normal,
-            weight: 1.0,
+            vocab_type: VocabType::INDEXED,
             index: 0,
         }
     }
 }
 
 impl VocabParams {
-    pub fn with_weight(mut self, weight: f32) -> Self {
-        self.weight = weight;
-        self
-    }
+    /// Set the vocabulary type (removes any previous values)
     pub fn with_vocab_type(mut self, vocab_type: VocabType) -> Self {
         self.vocab_type = vocab_type;
         self
@@ -137,30 +138,27 @@ pub(crate) fn init_vocab(decoder: &mut VocabDecoder, encoder: &mut HashMap<Strin
         norm: vec!(),
         frequency: 0,
         tokencount: 1,
-        lexweight: 0.0,
         lexindex: 0,
         variants: None,
-        vocabtype: VocabType::NoIndex,
+        vocabtype: VocabType::NONE,
     });
     decoder.push(VocabValue {
         text: "<eos>".to_string(),
         norm: vec!(),
         frequency: 0,
         tokencount: 1,
-        lexweight: 0.0,
         lexindex: 0,
         variants: None,
-        vocabtype: VocabType::NoIndex,
+        vocabtype: VocabType::NONE,
     });
     decoder.push(VocabValue {
         text: "<unk>".to_string(),
         norm: vec!(),
         frequency: 0,
         tokencount: 1,
-        lexweight: 0.0,
         lexindex: 0,
         variants: None,
-        vocabtype: VocabType::NoIndex,
+        vocabtype: VocabType::NONE,
     });
     encoder.insert("<bos>".to_string(),BOS);
     encoder.insert("<eos>".to_string(),EOS);

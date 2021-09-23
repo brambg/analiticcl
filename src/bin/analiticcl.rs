@@ -2,7 +2,7 @@ extern crate clap;
 extern crate rayon;
 
 use std::fs::File;
-use std::io::{self, BufReader,BufRead,Read};
+use std::io::{self, BufReader,BufRead,Read,Write};
 use clap::{Arg, App, SubCommand};
 use std::collections::HashMap;
 use std::time::SystemTime;
@@ -12,7 +12,7 @@ use rayon::prelude::*;
 
 use analiticcl::*;
 
-fn output_matches_as_tsv(model: &VariantModel, input: &str, variants: Option<&Vec<(VocabId, f64)>>, selected: Option<usize>, offset: Option<Offset>, output_lexmatch: bool) {
+fn output_matches_as_tsv(model: &VariantModel, input: &str, variants: Option<&Vec<(VocabId, f64, f64)>>, selected: Option<usize>, offset: Option<Offset>, output_lexmatch: bool) {
     print!("{}",input);
     if let Some(offset) = offset {
         print!("\t{}:{}",offset.begin, offset.end);
@@ -20,7 +20,7 @@ fn output_matches_as_tsv(model: &VariantModel, input: &str, variants: Option<&Ve
     if let Some(variants) = variants {
         if let Some(selected) = selected {
             //output selected value before all others
-            if let Some((vocab_id, score)) = variants.get(selected) {
+            if let Some((vocab_id, score, _freq_score)) = variants.get(selected) {
                 let vocabvalue = model.get_vocab(*vocab_id).expect("getting vocab by id");
                 print!("\t{}\t{}\t", vocabvalue.text, score);
                 if  output_lexmatch {
@@ -28,7 +28,7 @@ fn output_matches_as_tsv(model: &VariantModel, input: &str, variants: Option<&Ve
                 }
             }
         }
-        for (i, (vocab_id, score)) in variants.iter().enumerate() {
+        for (i, (vocab_id, score, _freq_score)) in variants.iter().enumerate() {
             if selected.is_none() || selected.unwrap() != i { //output all others
                 let vocabvalue = model.get_vocab(*vocab_id).expect("getting vocab by id");
                 print!("\t{}\t{}\t", vocabvalue.text, score);
@@ -41,7 +41,7 @@ fn output_matches_as_tsv(model: &VariantModel, input: &str, variants: Option<&Ve
     println!();
 }
 
-fn output_matches_as_json(model: &VariantModel, input: &str, variants: Option<&Vec<(VocabId, f64)>>, selected: Option<usize>, offset: Option<Offset>, output_lexmatch: bool, seqnr: usize) {
+fn output_matches_as_json(model: &VariantModel, input: &str, variants: Option<&Vec<(VocabId, f64, f64)>>, selected: Option<usize>, offset: Option<Offset>, output_lexmatch: bool, seqnr: usize) {
     if seqnr > 1 {
         println!(",")
     }
@@ -53,9 +53,10 @@ fn output_matches_as_json(model: &VariantModel, input: &str, variants: Option<&V
         println!(", \"variants\": [ ");
         let l = variants.len();
         if let Some(selected) = selected {
-            if let Some((vocab_id, score)) = variants.get(selected) {
+            if let Some((vocab_id, score, freq_score)) = variants.get(selected) {
                 let vocabvalue = model.get_vocab(*vocab_id).expect("getting vocab by id");
                 print!("        {{ \"text\": \"{}\", \"score\": {}", vocabvalue.text.replace("\"","\\\""), score);
+                print!(", \"freq_score\": {}", freq_score);
                 if  output_lexmatch {
                     print!(", \"lexicon\": \"{}\"", model.lexicons.get(vocabvalue.lexindex as usize).expect("valid lexicon index"));
                 }
@@ -66,10 +67,11 @@ fn output_matches_as_json(model: &VariantModel, input: &str, variants: Option<&V
                 }
             }
         }
-        for (i, (vocab_id, score)) in variants.iter().enumerate() {
+        for (i, (vocab_id, score, freq_score)) in variants.iter().enumerate() {
             if selected.is_none() || selected.unwrap() != i { //output all others
                 let vocabvalue = model.get_vocab(*vocab_id).expect("getting vocab by id");
                 print!("        {{ \"text\": \"{}\", \"score\": {}", vocabvalue.text.replace("\"","\\\""), score);
+                print!(", \"freq_score\": {}", freq_score);
                 if  output_lexmatch {
                     print!(", \"lexicon\": \"{}\"", model.lexicons.get(vocabvalue.lexindex as usize).expect("valid lexicon index"));
                 }
@@ -86,8 +88,31 @@ fn output_matches_as_json(model: &VariantModel, input: &str, variants: Option<&V
     }
 }
 
+
+///auxiliary function outputting a single variant
+fn output_weighted_variant_as_tsv(text: &str, score: f64, lexindex: u8, multioutput: bool, outfiles: &mut HashMap<u8,File>, model: &VariantModel) {
+    if multioutput {
+        let f = if let Some(f) = outfiles.get_mut(&lexindex) {
+            f
+        } else {
+            let filename: String = format!("{}.variants.tsv", model.lexicons.get(lexindex as usize).expect("lexindex must exist"));
+            if let Ok(f) = File::create(filename.as_str()) {
+                outfiles.insert(lexindex, f);
+                outfiles.get_mut(&lexindex).expect("outfile must be prepared")
+            } else {
+                panic!("unable to write to {}", filename.as_str());
+            }
+        };
+        f.write(format!("\t{}\t{}\n", text, score).as_bytes()).expect("error writing to file");
+    } else {
+        print!("\t{}\t{}", text, score);
+    }
+}
+
+
 /// Outputs weighted variants stored in the model as tsv
-fn output_weighted_variants_as_tsv(model: &VariantModel) {
+fn output_weighted_variants_as_tsv(model: &VariantModel, multioutput: bool) {
+    let mut outfiles: HashMap<u8,File> = HashMap::new();
     for vocabitem in model.decoder.iter() {
         if let Some(variants) = &vocabitem.variants {
             print!("{}", vocabitem.text);
@@ -95,14 +120,14 @@ fn output_weighted_variants_as_tsv(model: &VariantModel) {
                 match variant {
                     VariantReference::WeightedVariant((vocab_id, score)) => {
                         let variantitem = model.decoder.get(*vocab_id as usize).expect("vocab id must exist");
-                        print!("\t{}\t{}", variantitem.text, score);
+                        output_weighted_variant_as_tsv(&variantitem.text, *score, variantitem.lexindex, multioutput, &mut outfiles, model);
                     },
                     VariantReference::VariantCluster(cluster_id) => {
 
                         let cluster = model.variantclusters.get(&cluster_id).expect("cluster id must exist");
                         for vocab_id in cluster.iter() {
                             let variantitem = model.decoder.get(*vocab_id as usize).expect("vocab id must exist");
-                            print!("\t{}\t{}", variantitem.text, 1.0);
+                            output_weighted_variant_as_tsv(&variantitem.text, 1.0, variantitem.lexindex, multioutput, &mut outfiles, model);
                         }
                     }
                 }
@@ -112,8 +137,29 @@ fn output_weighted_variants_as_tsv(model: &VariantModel) {
     }
 }
 
+///auxiliary function outputting a single variant
+fn output_weighted_variant_as_json(text: &str, score: f64, lexindex: u8, multioutput: bool, outfiles: &mut HashMap<u8,File>, model: &VariantModel) {
+    if multioutput {
+        let f = if let Some(f) = outfiles.get_mut(&lexindex) {
+            f
+        } else {
+            let filename: String = format!("{}.variants.json", model.lexicons.get(lexindex as usize).expect("lexindex must exist"));
+            if let Ok(f) = File::create(filename.as_str()) {
+                outfiles.insert(lexindex, f);
+                outfiles.get_mut(&lexindex).expect("outfile must be prepared")
+            } else {
+                panic!("unable to write to {}", filename.as_str());
+            }
+        };
+        f.write(format!("        {{ \"text\": \"{}\", \"score\": {} }}, ", text.replace("\"","\\\""), score).as_bytes()).expect("error writing to file");
+    } else {
+        println!("        {{ \"text\": \"{}\", \"score\": {} }}, ", text.replace("\"","\\\""), score);
+    }
+}
+
 /// Outputs weighted variants stored in the model as tsv
-fn output_weighted_variants_as_json(model: &VariantModel) {
+fn output_weighted_variants_as_json(model: &VariantModel, multioutput: bool) {
+    let mut outfiles: HashMap<u8,File> = HashMap::new();
     println!("{{");
     for vocabitem in model.decoder.iter() {
         println!("    \"{}\": [ ", vocabitem.text.replace("\"","\\\"").as_str());
@@ -122,14 +168,14 @@ fn output_weighted_variants_as_json(model: &VariantModel) {
                 match variant {
                     VariantReference::WeightedVariant((vocab_id, score)) => {
                         let variantitem = model.decoder.get(*vocab_id as usize).expect("vocab id must exist");
-                        println!("        {{ \"text\": \"{}\", \"score\": {} }}, ", variantitem.text.replace("\"","\\\""), score);
+                        output_weighted_variant_as_json(&variantitem.text, *score, variantitem.lexindex, multioutput, &mut outfiles, model);
                     },
                     VariantReference::VariantCluster(cluster_id) => {
 
                         let cluster = model.variantclusters.get(&cluster_id).expect("cluster id must exist");
                         for vocab_id in cluster.iter() {
                             let variantitem = model.decoder.get(*vocab_id as usize).expect("vocab id must exist");
-                            println!("        {{ \"text\": \"{}\", \"score\": 1.0 }}, ", variantitem.text.replace("\"","\\\""));
+                            output_weighted_variant_as_json(&variantitem.text, 1.0, variantitem.lexindex, multioutput, &mut outfiles, model);
                         }
                     }
                 }
@@ -207,7 +253,7 @@ fn process_par(model: &VariantModel, inputstream: impl Read, searchparams: &Sear
     Ok(())
 }
 
-fn process_learn(model: &mut VariantModel, inputstream: impl Read, searchparams: &SearchParameters, iterations: u8, json: bool) -> io::Result<()> {
+fn process_learn(model: &mut VariantModel, inputstream: impl Read, searchparams: &SearchParameters, iterations: u8, json: bool, multioutput: bool ) -> io::Result<()> {
     let f_buffer = BufReader::new(inputstream);
     let mut line_iter = f_buffer.lines();
     let mut batch = vec![]; //batch for learning contains all input data at once
@@ -216,17 +262,17 @@ fn process_learn(model: &mut VariantModel, inputstream: impl Read, searchparams:
     }
     let batch_size = batch.len();
     for i in 0..iterations {
-        let (count, unknown) = model.learn_variants(&batch, searchparams, None, true);
-        if json {
-            output_weighted_variants_as_json(model);
-        } else {
-            output_weighted_variants_as_tsv(model);
-        }
+        let (count, unknown) = model.learn_variants(&batch, searchparams, true);
         eprintln!("(Iteration #{}: learned {} variants, unable to match {} input strings out of a total of {})", i+1, count, unknown, batch_size);
         if count == 0 && i+1 < iterations {
             eprintln!("(Halting further iterations)");
             break;
         }
+    }
+    if json {
+        output_weighted_variants_as_json(model, multioutput);
+    } else {
+        output_weighted_variants_as_tsv(model, multioutput);
     }
     Ok(())
 }
@@ -303,19 +349,11 @@ pub fn common_arguments<'a,'b>() -> Vec<clap::Arg<'a,'b>> {
     args.push( Arg::with_name("lexicon")
         .long("lexicon")
         .short("l")
-        .help("Lexicon against which all matches are made (may be used multiple times). The lexicon should only contain validated items, if not, use --corpus instead. The lexicon should be a tab separated file with each entry on one line, columns may be used for frequency information. This option may be used multiple times for multiple lexicons. Entries need not be single words but may also be ngrams (space separated tokens).")
+        .help("Lexicon against which all matches are made (may be used multiple times). The lexicon should be a tab separated file with each entry on one line, columns may be used for frequency information. This option may be used multiple times for multiple lexicons. Entries need not be single words but may also be ngrams (space separated tokens).")
         .takes_value(true)
         .number_of_values(1)
         .multiple(true)
-        .required_unless("corpus"));
-    args.push(Arg::with_name("corpus")
-        .long("corpus")
-        .short("f")
-        .help("Corpus-derived lexicon/frequency list against which matches are made (may be used multiple times). Format is the same as for --lexicon. The only difference between --lexicon and --corpus is that items from corpus a lexicon loaded through --corpus is given less weight. This option may be used multiple times.")
-        .takes_value(true)
-        .number_of_values(1)
-        .multiple(true)
-        .required_unless("lexicon"));
+        .required_unless("weighted-variants"));
     args.push(Arg::with_name("variants")
         .long("variants")
         .short("V")
@@ -370,8 +408,8 @@ pub fn common_arguments<'a,'b>() -> Vec<clap::Arg<'a,'b>> {
     args.push(Arg::with_name("stop-exact")
         .short("s")
         .long("stop-exact")
-        .help("Do not continue looking for variants once an exact match has been found. This significantly speeds up the process. This takes a floating point parameter that specifies the minimum lexicon weight that must be adhered to for the process to actually stop (set to 0.0 to apply equally to all lexicons, 1.0 to only apply to verified lexicons)")
-        .takes_value(true)
+        .help("Do not continue looking for variants once an exact match has been found. This significantly speeds up the process.")
+        .takes_value(false)
         .required(false));
     args.push(Arg::with_name("score-threshold")
         .long("score-threshold")
@@ -383,10 +421,15 @@ pub fn common_arguments<'a,'b>() -> Vec<clap::Arg<'a,'b>> {
     args.push(Arg::with_name("cutoff-threshold")
         .long("cutoff-threshold")
         .short("T")
-        .help("If a score in variant ranking is this factor worse than the best score, the ranking is cut off at this point and this score and all lower ones are pruned. This is a relative score threshold. Value must be greater than one, or 0 to disable. It will be applied after score reweighing against confusible lists.")
+        .help("If a score in variant ranking is this factor worse than the best score, the ranking is cut off at this point and this score and all lower ones are pruned. This is a relative score threshold. Value must be equal or greater than one, or 0 to disable. It will be applied after score reweighing against confusible lists.")
         .takes_value(true)
         .default_value("2.0")
         .required(false));
+    args.push(Arg::with_name("freq-ranking")
+        .short("F")
+        .long("freq-ranking")
+        .help("Consider frequency information and not just similarity scores when ranking variant candidates. The actual ranking will be a weighted combination between the similarity score and the frequency score. The value for this parameter is the weight you want to attribute to the frequency component in ranking, in relation to similarity. (a value between 0 and 1.0). Note that even if this parameter is not set, frequency information will always be used to break ties in case of similarity score")
+        .takes_value(true));
     /*args.push(Arg::with_name("search-cache")
         .long("search-cache")
         .help("Cache visited nodes between searches to speed up the search at the cost of increased memory. Only works for single core currently where it is enabled by default. The value corresponds to the maximum number of anagram values to cache, this should be set to a fairly high number, depending on memory availability, such as 100000. Set to 0 to disable the cache.")
@@ -407,47 +450,42 @@ pub fn common_arguments<'a,'b>() -> Vec<clap::Arg<'a,'b>> {
         .long("weight-ld")
         .help("Weight attributed to Damarau-Levenshtein distance in scoring")
         .takes_value(true)
-        .default_value("1.0"));
+        .default_value("0.5"));
     args.push(Arg::with_name("weight-lcs")
         .long("weight-lcs")
         .help("Weight attributed to Longest common substring length in scoring")
         .takes_value(true)
-        .default_value("1.0"));
+        .default_value("0.125"));
     args.push(Arg::with_name("weight-prefix")
         .long("weight-prefix")
         .help("Weight attributed to longest common prefix length in scoring")
         .takes_value(true)
-        .default_value("1.0"));
+        .default_value("0.125"));
     args.push(Arg::with_name("weight-suffix")
         .long("weight-suffix")
         .help("Weight attributed to longest common suffix length in scoring")
         .takes_value(true)
-        .default_value("1.0"));
-    args.push(Arg::with_name("weight-freq")
+        .default_value("0.125"));
+    /*args.push(Arg::with_name("weight-freq")
         .long("weight-freq")
         .help("Weight attributed to frequency in scoring")
         .takes_value(true)
-        .default_value("1.0"));
-    args.push(Arg::with_name("weight-lex")
-        .long("weight-lex")
-        .help("Weight attributed to items that are in the lexicon, will always be 0 for items only in the corpus")
-        .takes_value(true)
-        .default_value("1.0"));
+        .default_value("1.0"));*/
     args.push(Arg::with_name("weight-case")
         .long("weight-case")
         .help("Weight attributed to a difference in casing")
         .takes_value(true)
-        .default_value("0.2"));
+        .default_value("0.125"));
     args.push(Arg::with_name("max-anagram-distance")
         .long("max-anagram-distance")
         .short("k")
-        .help("Maximum anagram distance. This impacts the size of the search space. Each insertion or deletion has cost 1, substitutions can not be seperately tracked so they counts as 2 (deletion+insertion). It is therefore recommended to set this value slightly higher than the max edit distance.")
+        .help("Maximum anagram distance. Can either be an absolute value (integer), or a ratio of the input length (float between 0.0 and 1.0). The anagram distance impacts the size of the search space. Each insertion or deletion has cost 1, substitutions can not be separately tracked so they counts as 2 (deletion+insertion). It is therefore recommended to set this value slightly higher than the max edit distance.")
         .takes_value(true)
         .default_value("3"));
     args.push(Arg::with_name("max-edit-distance")
         .long("max-edit-distance")
         .short("d")
-        .help("Maximum edit distance (levenshtein-damarau). The maximum edit distance according to Levenshtein-Damarau. Insertions, deletions, substitutions and transposition all have the same cost (1). It is recommended to set this value slightly lower than the maximum anagram distance.")
+        .help("Maximum edit distance (levenshtein-damarau). The maximum edit distance according to Levenshtein-Damarau. Can either be an absolute value (integer), or a ratio of the input length (float between 0.0 and 1.0) so longer inputs use a higher edit distance than short ones. Insertions, deletions, substitutions and transposition all have the same cost (1). It is recommended to set this value slightly lower than the maximum anagram distance.")
         .takes_value(true)
         .default_value("2"));
     args.push(Arg::with_name("max-matches")
@@ -493,7 +531,7 @@ fn main() {
                             .arg(Arg::with_name("max-ngram-order")
                                 .long("max-ngram-order")
                                 .short("N")
-                                .help("Maximum ngram order (1 for unigrams, 2 for bigrams, etc..). This also requires you to load actual ngram frequency lists using --corpus or --lm to have any effect.")
+                                .help("Maximum ngram order for variant lookup (1 for unigrams, 2 for bigrams, etc..)")
                                 .takes_value(true)
                                 .default_value("3"))
                             .arg(Arg::with_name("max-seq")
@@ -504,20 +542,35 @@ fn main() {
                                 .default_value("250"))
                             .arg(Arg::with_name("lm")
                                 .long("lm")
-                                .help("Corpus-derived list of unigrams and bigrams that are used for simple language modelling, i.e. computation the transition probabilities when finding the optimal sequence of variants. This is a TSV file containing the the ngram in the first column (space character acts as token separator), and the absolute frequency count in the second column. It is also recommended it contains the special tokens <bos> (begin of sentence) and <eos> end of sentence. The items in this list are NOT used for variant matching, use --corpus or even --lexicon instead if you want to also match against these items.")
+                                .help("Language model, a corpus-derived list of n-grams with absolute frequency counts. This is a TSV file containing the the ngram in the first column (space character acts as token separator), and the absolute frequency count in the second column. It is also recommended it contains the special tokens <bos> (begin of sentence) and <eos> end of sentence. The items in this list are NOT used for variant matching, use --corpus or even --lexicon instead if you want to also match against these items. Conversely, files provides through --lexicon and --corpus and other options are NOT used for language modelling.")
                                 .takes_value(true)
                                 .number_of_values(1)
                                 .multiple(true))
+                            .arg(Arg::with_name("lm-order")
+                                .long("lm-order")
+                                .short("L")
+                                .help("N-gram order for Language models (2 for bigrams, 3 for trigrams, etc..)")
+                                .takes_value(true)
+                                .default_value("3"))
                             .arg(Arg::with_name("weight-lm")
                                 .long("weight-lm")
-                                .help("Weight attributed to the language model")
+                                .help("Weight attributed to the language model in finding the most likely sequence in search mode")
                                 .takes_value(true)
                                 .default_value("1.0"))
                             .arg(Arg::with_name("weight-variant-model")
                                 .long("weight-variant-model")
-                                .help("Weight attributed to the variant model")
+                                .help("Weight attributed to the variant model in finding the most likely sequence in search mode")
                                 .takes_value(true)
                                 .default_value("1.0"))
+                            .arg(Arg::with_name("weight-context")
+                                .long("weight-context")
+                                .help("For rescoring against input context using a language model: weight attributed to the language model in relation to the variant model. (0=disabled, default, 1.0=equal weight, 0.5=half as strong as the variant model). Setting this forces consideration of input context in an earlier stage. Only relevant for search mode.")
+                                .takes_value(true)
+                                .default_value("0.0"))
+                            .arg(Arg::with_name("allow-overlap")
+                                .long("allow-overlap")
+                                .help("Do not consolidate multiple matches by finding a most likely sequence, but simply return all matches as-is, even if they overlap.")
+                                .takes_value(false))
                     )
                     .subcommand(
                         SubCommand::with_name("learn")
@@ -529,11 +582,15 @@ fn main() {
                                 .help("The number of iterations to use for learning, more iterations means more edit distance can be covered and more words will be tied to something, but the accuracy may suffer as the iterations go up.")
                                 .takes_value(true)
                                 .default_value("1"))
+                            .arg(Arg::with_name("multi-output")
+                                .short("O")
+                                .long("multi-output")
+                                .help("Output to multiple weighted variant lists rather than to standard output, each variant lists corresponds to an input lexicon. This allows keeping the link with the original lexicon."))
                     )
                     .arg(Arg::with_name("debug")
                         .long("debug")
                         .short("D")
-                        .help("Set debug level, can be set to 1 or 2")
+                        .help("Set debug level, can be set in range 0-4")
                         .takes_value(true)
                         .required(false))
                     .get_matches();
@@ -557,8 +614,6 @@ fn main() {
         lcs: args.value_of("weight-lcs").unwrap().parse::<f64>().expect("Weights should be a floating point value"),
         prefix: args.value_of("weight-prefix").unwrap().parse::<f64>().expect("Weights should be a floating point value"),
         suffix: args.value_of("weight-suffix").unwrap().parse::<f64>().expect("Weights should be a floating point value"),
-        freq: args.value_of("weight-freq").unwrap().parse::<f64>().expect("Weights should be a floating point value"),
-        lex: args.value_of("weight-lex").unwrap().parse::<f64>().expect("Weights should be a floating point value"),
         case: args.value_of("weight-case").unwrap().parse::<f64>().expect("Weights should be a floating point value"),
     };
 
@@ -577,7 +632,7 @@ fn main() {
     let mut model = VariantModel::new(
         args.value_of("alphabet").unwrap(),
         weights,
-        rootargs.value_of("debug").unwrap_or("0").parse::<u8>().expect("Debug level should be a 0, 1 or 2")
+        rootargs.value_of("debug").unwrap_or("0").parse::<u8>().expect("Debug level should be integer in range 0-4")
     );
 
     eprintln!("Loading lexicons...");
@@ -587,21 +642,10 @@ fn main() {
             model.read_vocabulary(filename, &VocabParams::default()).expect(&format!("Error reading lexicon {}", filename));
         }
     }
-
-    if args.is_present("corpus") {
-        for filename in args.values_of("corpus").unwrap().collect::<Vec<&str>>() {
-            model.read_vocabulary(filename, &VocabParams {
-                weight: 0.0,
-                ..Default::default()
-            }).expect(&format!("Error reading corpus lexicon {}", filename));
-        }
-    }
-
     if args.is_present("lm") {
         for filename in args.values_of("lm").unwrap().collect::<Vec<&str>>() {
             model.read_vocabulary(filename, &VocabParams {
-                weight: 0.0,
-                vocab_type: VocabType::NoIndex,
+                vocab_type: VocabType::LM,
                 ..Default::default()
             }).expect(&format!("Error reading lm {}", filename));
         }
@@ -644,22 +688,32 @@ fn main() {
     let retain_linebreaks = args.is_present("retain-linebreaks");
 
     let searchparams = SearchParameters {
-        max_anagram_distance: args.value_of("max-anagram-distance").unwrap().parse::<u8>().expect("Anagram distance should be an integer between 0 and 255"),
-        max_edit_distance: args.value_of("max-edit-distance").unwrap().parse::<u8>().expect("Anagram distance should be an integer between 0 and 255"),
+        max_anagram_distance: args.value_of("max-anagram-distance").unwrap().parse::<DistanceThreshold>().expect("Anagram distance should be an integer between 0 and 255 (absolute) or a float between 0 and 1 (ratio)"),
+        max_edit_distance: args.value_of("max-edit-distance").unwrap().parse::<DistanceThreshold>().expect("Anagram distance should be an integer between 0 and 255 (absolute) or a float between 0 and 1 (ratio)"),
         max_matches: args.value_of("max-matches").unwrap().parse::<usize>().expect("Maximum matches should should be an integer (0 for unlimited)"),
         score_threshold: args.value_of("score-threshold").unwrap().parse::<f64>().expect("Score threshold should be a floating point number"),
         cutoff_threshold: args.value_of("cutoff-threshold").unwrap().parse::<f64>().expect("Cutoff threshold should be a floating point number"),
         stop_criterion: if args.is_present("stop-exact") {
-            let minlexweight = args.value_of("stop-exact").unwrap().parse::<f32>().expect("Value for --stop-exact must be a floating point value");
-            StopCriterion::StopAtExactMatch(minlexweight)
+            StopCriterion::StopAtExactMatch
         } else {
             StopCriterion::Exhaustive
         },
         single_thread: args.is_present("single-thread") || args.is_present("debug") || args.is_present("interactive"),
+        consolidate_matches: !args.is_present("allow-overlap"),
         max_ngram: if let Some(value) = args.value_of("max-ngram-order") {
             value.parse::<u8>().expect("Max n-gram should be a small integer")
         } else {
-            0
+            1
+        },
+        freq_weight: if args.is_present("freq-ranking") {
+            args.value_of("freq-ranking").unwrap().parse::<f32>().expect("Frequency weight for frequency ranking should be a floating point number (between 0 and 1)")
+        } else {
+            0.0
+        },
+        lm_order: if let Some(value) = args.value_of("lm-order") {
+            value.parse::<u8>().expect("LM order should be a small integer")
+        } else {
+            1
         },
         lm_weight: if args.is_present("weight-lm") {
             args.value_of("weight-lm").unwrap().parse::<f32>().expect("Language model weight should be a floating point number")
@@ -668,6 +722,11 @@ fn main() {
         },
         variantmodel_weight: if args.is_present("weight-variant-model") {
             args.value_of("weight-variant-model").unwrap().parse::<f32>().expect("Variant model weight should be a floating point number")
+        } else {
+            1.0
+        },
+        context_weight: if args.is_present("weight-context") {
+            args.value_of("weight-context").unwrap().parse::<f32>().expect("Context weight should be a floating point number")
         } else {
             1.0
         },
@@ -683,6 +742,9 @@ fn main() {
         eprintln!("ERROR: Cutoff-threshold must be >= 1.0, or 0 to disable");
         exit(2);
     }
+
+    eprintln!("Search parameters:");
+    eprintln!("{}", searchparams);
 
     if args.is_present("early-confusables") {
         model.set_confusables_before_pruning();
@@ -727,7 +789,7 @@ fn main() {
                     let stdin = io::stdin();
                     if rootargs.subcommand_matches("learn").is_some() {
                         let iterations = args.value_of("iterations").unwrap().parse::<u8>().expect("Iterations should be an integer between 0 and 255");
-                        process_learn(&mut model, stdin, &searchparams,  iterations, json).expect("I/O Error");
+                        process_learn(&mut model, stdin, &searchparams,  iterations, json, args.is_present("multi-output")).expect("I/O Error");
                     } else if rootargs.subcommand_matches("search").is_some() {
                         eprintln!("(accepting standard input; enter text to search for variants, output may be delayed until end of input, enter an empty line to force output earlier)");
                         process_search(&model, stdin, &searchparams, output_lexmatch, json, progress, !retain_linebreaks, perline);
@@ -744,7 +806,7 @@ fn main() {
                     let f = File::open(filename).expect(format!("ERROR: Unable to open file {}", filename).as_str());
                     if rootargs.subcommand_matches("learn").is_some() {
                         let iterations = args.value_of("iterations").unwrap().parse::<u8>().expect("Iterations should be an integer between 0 and 255");
-                        process_learn(&mut model, f, &searchparams, iterations, json).expect("I/O Error");
+                        process_learn(&mut model, f, &searchparams, iterations, json, args.is_present("multi-output")).expect("I/O Error");
                     } else if rootargs.subcommand_matches("search").is_some() {
                         process_search(&model, f, &searchparams, output_lexmatch, json, progress, !retain_linebreaks, perline);
                     } else if searchparams.single_thread {

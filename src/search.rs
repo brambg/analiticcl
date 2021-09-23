@@ -21,13 +21,21 @@ pub struct Match<'a> {
     /// The byte offset where this match was found in the larger text
     pub offset: Offset,
 
-    /// The variants for this match (sorted by decreasing score)
-    pub variants: Option<Vec<(VocabId, f64)>>,
+    /// The variants for this match (sorted by decreasing distance score (first score), second score is frequency score)
+    pub variants: Option<Vec<(VocabId, f64, f64)>>,
 
     ///the variant that was selected after searching and ranking (if any)
-    pub selected: Option<usize>
-}
+    pub selected: Option<usize>,
 
+    /// the index of the previous boundary, None if at start position
+    pub prevboundary: Option<usize>,
+
+    /// the index of the next boundary
+    pub nextboundary: Option<usize>,
+
+    /// The number of tokens (boundaries spanned)
+    pub n: usize
+}
 
 impl<'a> Match<'a> {
     pub fn new_empty(text: &'a str, offset: Offset) -> Self {
@@ -36,6 +44,9 @@ impl<'a> Match<'a> {
             offset,
             variants: None,
             selected: None,
+            prevboundary: None,
+            nextboundary: None,
+            n: 0
         }
     }
 
@@ -44,8 +55,9 @@ impl<'a> Match<'a> {
         self.variants.is_none() || self.variants.as_ref().unwrap().is_empty()
     }
 
-    /// Returns the solution if there is one
-    pub fn solution(&self) -> Option<(VocabId,f64)> {
+    /// Returns the solution if there is one. Returns an option containing a VocabId, distance
+    /// score and frequency score.
+    pub fn solution(&self) -> Option<(VocabId,f64,f64)> {
         if let Some(selected) = self.selected {
             self.variants.as_ref().expect("match must have variants when 'selected' is set").get(selected).map(|x| *x)
         } else {
@@ -74,8 +86,14 @@ impl<'a> Match<'a> {
     }
 }
 
-///Indicates an output label is out of vocabulary and should simply be copied from input
-pub(crate) const OOV_EMISSION_PROB: f32 = -2.3025850929940455; //p = 0.1
+
+
+#[derive(Clone,Debug)]
+/// Refers to a match and its unigram context
+pub struct Context<'a> {
+    pub left: Option<&'a str>,
+    pub right: Option<&'a str>
+}
 
 
 
@@ -106,16 +124,18 @@ pub struct OutputSymbol {
 #[derive(Clone,Debug)]
 pub struct Sequence {
     pub output_symbols: Vec<OutputSymbol>,
-    pub emission_logprob: f32,
+    pub variant_cost: f32,
     pub lm_logprob: f32,
+    pub perplexity: f64,
 }
 
 impl Sequence {
-    pub fn new(emission_logprob: f32) -> Self {
+    pub fn new(variant_cost: f32) -> Self {
         Self {
             output_symbols: Vec::new(),
-            emission_logprob,
+            variant_cost,
             lm_logprob: 0.0,
+            perplexity: 0.0,
         }
     }
 
@@ -217,28 +237,57 @@ pub fn find_match_ngrams<'a>(text: &'a str, boundaries: &[Match<'a>], order: u8,
         if boundary.offset.begin > end {
             break;
         }
-        let ngram = Match::new_empty(&text[begin..boundary.offset.begin], Offset {
-                begin: begin,
-                end: boundary.offset.begin,
-        });
+        let matchtext = &text[begin..boundary.offset.begin];
+        if !matchtext.is_empty() && matchtext != " " {
+            let mut ngram = Match::new_empty(matchtext, Offset {
+                    begin: begin,
+                    end: boundary.offset.begin,
+            });
+            ngram.n = order as usize;
+            ngrams.push(ngram);
+        }
         begin = boundaries.get(i).expect("boundary").offset.end;
         i += 1;
-        ngrams.push(ngram);
     }
 
     //add the last one
     if begin < end {
-        let ngram = Match::new_empty(&text[begin..end], Offset {
-                begin: begin,
-                end: end,
-        });
-        if ngram.internal_boundaries(boundaries).iter().count() == order as usize {
-            ngrams.push(ngram);
+        let matchtext = &text[begin..end];
+        if !matchtext.is_empty() && matchtext != " " {
+            let mut ngram = Match::new_empty(matchtext, Offset {
+                    begin: begin,
+                    end: end,
+            });
+            ngram.n = order as usize;
+            if ngram.internal_boundaries(boundaries).iter().count() == order as usize {
+                ngrams.push(ngram);
+            }
         }
     }
 
     ngrams
 }
 
+
+/// A redundant match is a higher order match which already scores a perfect score when its unigram
+/// components are considered separately.
+pub fn redundant_match<'a>(candidate: &Match<'a>, matches: &[Match<'a>]) -> bool {
+    for refmatch in matches.iter() {
+        if refmatch.n == 1 {
+            if refmatch.offset.begin >= candidate.offset.begin && refmatch.offset.end <= candidate.offset.end {
+                if let Some(variants) = &refmatch.variants {
+                    if variants.is_empty() || variants.get(0).expect("variant").1 < 1.0 {
+                        return false; //non-perfect score, so not redundant
+                    }
+                } else {
+                    return false; //no variants at all, so not redundant
+                }
+            }
+        } else {
+            break; //based on the assumption that all unigrams are at the beginning of the vector! (which should be valid in this implementation)
+        }
+    }
+    true
+}
 
 

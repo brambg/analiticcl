@@ -48,16 +48,20 @@ pub fn get_test_alphabet() -> (Alphabet,CharIndexType) {
 
 pub fn get_test_searchparams() -> SearchParameters {
     SearchParameters {
-        max_edit_distance: 2,
-        max_anagram_distance: 2,
+        max_edit_distance: DistanceThreshold::Absolute(2),
+        max_anagram_distance: DistanceThreshold::Absolute(2),
         max_matches: 10,
         stop_criterion: StopCriterion::Exhaustive,
         score_threshold: 0.0,
         cutoff_threshold: 0.0,
         max_ngram: 2,
-        single_thread: false,
+        lm_order: 2,
+        freq_weight: 0.0,
+        single_thread: true,
+        context_weight: 0.0,
         lm_weight: 1.0,
         variantmodel_weight: 1.0,
         max_seq: 250,
+        consolidate_matches: true,
     }
 }

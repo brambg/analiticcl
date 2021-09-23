@@ -4,6 +4,7 @@ description = "Analiticcl is an approximate string matching or fuzzy-matching sy
 documentation = "https://docs.rs/analiticcl"
 edition = "2018"
 homepage = "https://github.com/proycon/analiticcl"
+include = ["src/**/*", "LICENSE", "README.md"]
 keywords = ["nlp", "text-processing", "spelling-correction", "linguistics", "spellcheck"]
 license = "GPL-3.0+"
 name = "analiticcl"
@@ -15,12 +16,14 @@ harness = false
 name = "benchmarks"
 
 [dependencies]
+bitflags = "*"
 clap = "2.33.0"
 ibig = "0.3.2"
 num-traits = "0.2.14"
 rayon = "1.5.0"
 rustfst = "*"
 sesdiff = "0.3.0"
+simple-error = "*"
 
 [dev-dependencies]
 criterion = "0.3.4"
