@@ -868,6 +868,8 @@ fn test0702_find_all_matches() {
     assert_eq!( matches.get(0).unwrap().text , "I" );
     assert_eq!( model.match_to_str(matches.get(0).unwrap()) , "I" );
     assert_eq!( matches.get(1).unwrap().text , "tink" );
+    assert_eq!( matches.get(1).unwrap().offset.begin, 2 );
+    assert_eq!( matches.get(1).unwrap().offset.end, 6 );
     assert_eq!( model.match_to_str(matches.get(1).unwrap()) , "think" );
     assert_eq!( matches.get(2).unwrap().text , "you" );
     assert_eq!( model.match_to_str(matches.get(2).unwrap()) , "you" );
@@ -947,7 +949,7 @@ fn test0704_find_all_matches_two_batches() {
 #[test]
 fn test0705_find_all_matches_context_only() {
     let (alphabet, _alphabet_size) = get_test_alphabet();
-    let mut model = VariantModel::new_with_alphabet(alphabet, Weights::default(), 1);
+    let mut model = VariantModel::new_with_alphabet(alphabet, Weights::default(), 3);
     model.add_to_vocabulary("I",Some(2),&VocabParams::default());
     model.add_to_vocabulary("think",Some(2), &VocabParams::default());
     model.add_to_vocabulary("sink",Some(2), &VocabParams::default()); //language model will decide between think/sink
@@ -978,6 +980,49 @@ fn test0705_find_all_matches_context_only() {
 }
 
 
+#[test]
+fn test0706_find_all_matches_unicodeoffsets() {
+    let (alphabet, _alphabet_size) = get_test_alphabet();
+    let mut model = VariantModel::new_with_alphabet(alphabet, Weights::default(), 1);
+    let lexicon: &[&str] = &["I","think","you","are","right"];
+    for text in lexicon.iter() {
+        model.add_to_vocabulary(text,None,&VocabParams::default());
+    }
+    model.build();
+    let matches = model.find_all_matches("I thиnk you are rihgt", &get_test_searchparams().with_max_ngram(1).with_unicodeoffsets());
+    assert!( !matches.is_empty() );
+    assert_eq!( matches.get(0).unwrap().text , "I" );
+    assert_eq!( matches.get(1).unwrap().text , "thиnk" );
+    assert_eq!( matches.get(1).unwrap().offset.begin, 2 );
+    assert_eq!( matches.get(1).unwrap().offset.end, 7 );
+    assert_eq!( model.match_to_str(matches.get(1).unwrap()) , "think" );
+    assert_eq!( matches.get(2).unwrap().text , "you" );
+    assert_eq!( matches.get(3).unwrap().text , "are" );
+    assert_eq!( matches.get(4).unwrap().text , "rihgt" );
+    assert_eq!( model.match_to_str(matches.get(4).unwrap()) , "right" );
+}
+
+#[test]
+fn test0707_find_all_matches_utf8offsets() {
+    let (alphabet, _alphabet_size) = get_test_alphabet();
+    let mut model = VariantModel::new_with_alphabet(alphabet, Weights::default(), 1);
+    let lexicon: &[&str] = &["I","think","you","are","right"];
+    for text in lexicon.iter() {
+        model.add_to_vocabulary(text,None,&VocabParams::default());
+    }
+    model.build();
+    let matches = model.find_all_matches("I thиnk you are rihgt", &get_test_searchparams().with_max_ngram(1));
+    assert!( !matches.is_empty() );
+    assert_eq!( matches.get(0).unwrap().text , "I" );
+    assert_eq!( matches.get(1).unwrap().text , "thиnk" );
+    assert_eq!( matches.get(1).unwrap().offset.begin, 2 );
+    assert_eq!( matches.get(1).unwrap().offset.end, 8 );
+    assert_eq!( model.match_to_str(matches.get(1).unwrap()) , "think" );
+    assert_eq!( matches.get(2).unwrap().text , "you" );
+    assert_eq!( matches.get(3).unwrap().text , "are" );
+    assert_eq!( matches.get(4).unwrap().text , "rihgt" );
+    assert_eq!( model.match_to_str(matches.get(4).unwrap()) , "right" );
+}
 
 
 #[test]
@@ -1001,7 +1046,9 @@ fn test0901_find_all_matches_with_multiple_lexicons() {
     let (alphabet, _alphabet_size) = get_test_alphabet();
     let mut model = VariantModel::new_with_alphabet(alphabet, Weights::default(), 2);
     assert!(model.read_vocabulary(LEXICON_AMPHIBIANS, &VocabParams::default()).is_ok());
+    const LEXICON_AMPHIBIANS_INDEX: u8 = 0;
     assert!(model.read_vocabulary(LEXICON_REPTILES, &VocabParams::default()).is_ok());
+    const LEXICON_REPTILES_INDEX: u8 = 1;
     model.build();
     assert_eq!( model.lexicons.len(), 2);
     let inputwords = vec!("Salamander", "lizard","frog","snake","toad");
@@ -1021,20 +1068,82 @@ fn test0901_find_all_matches_with_multiple_lexicons() {
     }
 
     //salamander
-    assert_eq!( model.lexicons[model.match_to_vocabvalue(&matches[0]).expect("must exist").lexindex as usize],
-                LEXICON_AMPHIBIANS  );
+    assert!( model.match_to_vocabvalue(&matches[0]).expect("must exist").in_lexicon(LEXICON_AMPHIBIANS_INDEX) );
     //lizard
-    assert_eq!( model.lexicons[model.match_to_vocabvalue(&matches[1]).expect("must exist").lexindex as usize],
-                LEXICON_REPTILES  );
+    assert!( model.match_to_vocabvalue(&matches[1]).expect("must exist").in_lexicon(LEXICON_REPTILES_INDEX) );
     //frog
-    assert_eq!( model.lexicons[model.match_to_vocabvalue(&matches[2]).expect("must exist").lexindex as usize],
-                LEXICON_AMPHIBIANS  );
+    assert!( model.match_to_vocabvalue(&matches[2]).expect("must exist").in_lexicon(LEXICON_AMPHIBIANS_INDEX) );
     //snake
-    assert_eq!( model.lexicons[model.match_to_vocabvalue(&matches[3]).expect("must exist").lexindex as usize],
-                LEXICON_REPTILES  );
+    assert!( model.match_to_vocabvalue(&matches[3]).expect("must exist").in_lexicon(LEXICON_REPTILES_INDEX) );
     //toad
-    assert_eq!( model.lexicons[model.match_to_vocabvalue(&matches[4]).expect("must exist").lexindex as usize],
-                LEXICON_AMPHIBIANS  );
+    assert!( model.match_to_vocabvalue(&matches[4]).expect("must exist").in_lexicon(LEXICON_AMPHIBIANS_INDEX) );
 
 }
 
+#[test]
+fn test0902_find_all_match_context_rules_bonus() {
+    let (alphabet, _alphabet_size) = get_test_alphabet();
+    let mut model = VariantModel::new_with_alphabet(alphabet, Weights::default(), 2);
+    model.add_to_vocabulary("I",Some(2),&VocabParams::default());
+    model.add_to_vocabulary("think",Some(2), &VocabParams::default());
+    model.add_to_vocabulary("sink",Some(2), &VocabParams::default()); //context rule will decide between think/sink
+    model.add_to_vocabulary("you",Some(2), &VocabParams::default());
+    model.add_to_vocabulary("are",Some(2),&VocabParams::default());
+    model.add_to_vocabulary("right",Some(2),&VocabParams::default());
+    model.build();
+
+
+    model.add_contextrule("I; think", 1.1, Some("testtag"), None); //bonus!
+    //                                      ^-- tag the whole entity with 'testtag'
+
+    let mut params = get_test_searchparams();
+    params.lm_weight = 0.0; //disable normal language model
+    params.max_ngram = 1;
+    let matches = model.find_all_matches("I tink you are rihgt", &params);
+    assert!( !matches.is_empty() );
+    assert_eq!( matches.get(0).unwrap().text , "I" );
+    assert_eq!( matches.get(0).unwrap().tag , Some(0) );
+    assert_eq!( matches.get(0).unwrap().seqnr , Some(0) );
+    assert_eq!( model.match_to_str(matches.get(0).unwrap()) , "I" );
+    assert_eq!( matches.get(1).unwrap().text , "tink" );
+    assert_eq!( matches.get(1).unwrap().tag , Some(0) );
+    assert_eq!( matches.get(1).unwrap().seqnr , Some(1) );
+    assert_eq!( model.match_to_str(matches.get(1).unwrap()) , "think" );
+    assert_eq!( matches.get(2).unwrap().text , "you" );
+    assert_eq!( model.match_to_str(matches.get(2).unwrap()) , "you" );
+    assert_eq!( matches.get(3).unwrap().text , "are" );
+    assert_eq!( model.match_to_str(matches.get(3).unwrap()) , "are" );
+    assert_eq!( matches.get(4).unwrap().text , "rihgt" );
+    assert_eq!( model.match_to_str(matches.get(4).unwrap()) , "right" );
+}
+
+#[test]
+fn test0903_find_all_match_context_rules_penalty() {
+    let (alphabet, _alphabet_size) = get_test_alphabet();
+    let mut model = VariantModel::new_with_alphabet(alphabet, Weights::default(), 2);
+    model.add_to_vocabulary("I",Some(2),&VocabParams::default());
+    model.add_to_vocabulary("think",Some(2), &VocabParams::default());
+    model.add_to_vocabulary("sink",Some(2), &VocabParams::default()); //context rule will decide between think/sink
+    model.add_to_vocabulary("you",Some(2), &VocabParams::default());
+    model.add_to_vocabulary("are",Some(2),&VocabParams::default());
+    model.add_to_vocabulary("right",Some(2),&VocabParams::default());
+    model.build();
+
+    model.add_contextrule("I; think", 0.9, None, None); //penalty!
+
+    let mut params = get_test_searchparams();
+    params.lm_weight = 0.0; //disable normal language model
+    params.max_ngram = 1;
+    let matches = model.find_all_matches("I tink you are rihgt", &params);
+    assert!( !matches.is_empty() );
+    assert_eq!( matches.get(0).unwrap().text , "I" );
+    assert_eq!( model.match_to_str(matches.get(0).unwrap()) , "I" );
+    assert_eq!( matches.get(1).unwrap().text , "tink" );
+    assert_eq!( model.match_to_str(matches.get(1).unwrap()) , "sink" );
+    assert_eq!( matches.get(2).unwrap().text , "you" );
+    assert_eq!( model.match_to_str(matches.get(2).unwrap()) , "you" );
+    assert_eq!( matches.get(3).unwrap().text , "are" );
+    assert_eq!( model.match_to_str(matches.get(3).unwrap()) , "are" );
+    assert_eq!( matches.get(4).unwrap().text , "rihgt" );
+    assert_eq!( model.match_to_str(matches.get(4).unwrap()) , "right" );
+}

@@ -1,5 +1,6 @@
 extern crate analiticcl as libanaliticcl;
 
+use std::str::FromStr;
 use rayon::prelude::*;
 use pyo3::prelude::*;
 use pyo3::types::*;
@@ -69,17 +70,35 @@ impl PyWeights {
     fn set_suffix(&mut self, value: f64) -> PyResult<()> { self.weights.suffix = value; Ok(()) }
     #[setter]
     fn set_case(&mut self, value: f64) -> PyResult<()> { self.weights.case = value; Ok(()) }
+
+    fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<&'py PyDict> {
+        let dict = PyDict::new(py);
+        dict.set_item("ld", self.get_ld()?)?;
+        dict.set_item("lcs", self.get_lcs()?)?;
+        dict.set_item("prefix", self.get_prefix()?)?;
+        dict.set_item("suffix", self.get_suffix()?)?;
+        dict.set_item("case", self.get_case()?)?;
+        Ok(dict)
+    }
 }
 
 
 //should ideally be implemented using FromPyObject but can't do that because libanaliticcl is not considered not crate-internal anymore here
 fn extract_distance_threshold(value: &PyAny) -> PyResult<libanaliticcl::DistanceThreshold> {
-    if let Ok(Some(v)) = value.extract() {
+    if let Ok(Some((v,limit))) = value.extract() {
+        Ok(libanaliticcl::DistanceThreshold::RatioWithLimit(v,limit))
+    } else if let Ok(Some(v)) = value.extract() {
         Ok(libanaliticcl::DistanceThreshold::Absolute(v))
     } else if let Ok(Some(v)) = value.extract() {
         Ok(libanaliticcl::DistanceThreshold::Ratio(v))
+    } else if let Ok(Some(v)) = value.extract() {
+        if let Ok(v) = libanaliticcl::DistanceThreshold::from_str(v) {
+            Ok(v)
+        } else {
+            Err(PyValueError::new_err(format!("Unable to convert from string ({}). Must be an integer expressing an absolute value, or float in range 0-1 expressing a ratio. Or a two-tuple expression a ratio with an absolute limit (float;int)",v)))
+        }
     } else {
-        Err(PyValueError::new_err("Must be an integer expressing an absolute value, or float in range 0-1 expressing a ratio"))
+        Err(PyValueError::new_err("Must be an integer expressing an absolute value, or float in range 0-1 expressing a ratio. Or a two-tuple expression a ratio with an absolute limit (float, int)"))
     }
 }
 
@@ -103,26 +122,38 @@ impl PySearchParameters {
             for (key, value) in kwargs {
                 if let Some(key) = key.extract().unwrap() {
                     match key {
-                        "max_anagram_distance" => if let Ok(v) = extract_distance_threshold(value) {
-                            instance.data.max_anagram_distance = v
+                        "max_anagram_distance" => match extract_distance_threshold(value) {
+                            Ok(v) => instance.data.max_anagram_distance = v,
+                            Err(v) => eprintln!("{}", v)
                         },
-                        "max_edit_distance" => if let Ok(v) = extract_distance_threshold(value) {
-                            instance.data.max_edit_distance = v
+                        "max_edit_distance" => match extract_distance_threshold(value) {
+                            Ok(v) => instance.data.max_edit_distance = v,
+                            Err(v) => eprintln!("{}", v)
                         },
-                        "max_matches" => if let Ok(Some(value)) = value.extract() {
-                            instance.data.max_matches = value
+                        "max_matches" => match value.extract() {
+                            Ok(Some(value)) => instance.data.max_matches = value,
+                            Ok(None) => eprintln!("No value specified for max_matches parameter"),
+                            Err(v) => eprintln!("{}", v)
                          },
-                        "score_threshold" => if let Ok(Some(value)) = value.extract() {
-                            instance.data.score_threshold = value
+                        "score_threshold" => match value.extract() {
+                            Ok(Some(value)) => instance.data.score_threshold = value,
+                            Ok(None) => eprintln!("No value specified for score_threshold parameter"),
+                            Err(v) => eprintln!("{}", v)
                          },
-                        "cutoff_threshold" => if let Ok(Some(value)) = value.extract() {
-                            instance.data.cutoff_threshold = value
+                        "cutoff_threshold" => match value.extract() {
+                            Ok(Some(value)) => instance.data.cutoff_threshold = value,
+                            Ok(None) => eprintln!("No value specified for cutoff_threshold parameter"),
+                            Err(v) => eprintln!("{}", v)
                          },
-                        "max_ngram" => if let Ok(Some(value)) = value.extract() {
-                            instance.data.max_ngram = value
+                        "max_ngram" => match value.extract() {
+                            Ok(Some(value)) => instance.data.max_ngram = value,
+                            Ok(None) => eprintln!("No value specified for cutoff_threshold parameter"),
+                            Err(v) => eprintln!("{}", v)
                          },
-                        "max_seq" => if let Ok(Some(value)) = value.extract() {
-                            instance.data.max_seq = value
+                        "max_seq" => match value.extract() {
+                            Ok(Some(value)) => instance.data.max_seq = value,
+                            Ok(None) => eprintln!("No value specified for cutoff_threshold parameter"),
+                            Err(v) => eprintln!("{}", v)
                          },
                         "stop_at_exact_match" => {
                             if let Ok(Some(value)) = value.extract() {
@@ -133,23 +164,45 @@ impl PySearchParameters {
                                 }
                             }
                          },
-                        "single_thread" => if let Ok(Some(value)) = value.extract() {
-                            instance.data.single_thread = value
+                        "single_thread" => match value.extract() {
+                            Ok(Some(value)) => instance.data.single_thread = value,
+                            Ok(None) => eprintln!("No value specified for single_thread parameter"),
+                            Err(v) => eprintln!("{}", v)
                          },
-                        "freq_weight" => if let Ok(Some(value)) = value.extract() {
-                            instance.data.freq_weight = value
+                        "unicodeoffsets" => match value.extract() {
+                            Ok(Some(value)) => instance.data.unicodeoffsets = value,
+                            Ok(None) => eprintln!("No value specified for unicodeoffsets parameter"),
+                            Err(v) => eprintln!("{}", v)
                          },
-                        "lm_weight" => if let Ok(Some(value)) = value.extract() {
-                            instance.data.lm_weight = value
+                        "freq_weight" => match value.extract() {
+                            Ok(Some(value)) => instance.data.freq_weight = value,
+                            Ok(None) => eprintln!("No value specified for freq_weight parameter"),
+                            Err(v) => eprintln!("{}", v)
                          },
-                        "variantmodel_weight" => if let Ok(Some(value)) = value.extract() {
-                            instance.data.variantmodel_weight = value
+                        "lm_weight" => match value.extract() {
+                            Ok(Some(value)) => instance.data.lm_weight = value,
+                            Ok(None) => eprintln!("No value specified for lm_weight parameter"),
+                            Err(v) => eprintln!("{}", v)
                          },
-                        "context_weight" => if let Ok(Some(value)) = value.extract() {
-                            instance.data.context_weight = value
+                        "contextrules_weight" => match value.extract() {
+                            Ok(Some(value)) => instance.data.contextrules_weight = value,
+                            Ok(None) => eprintln!("No value specified for contextrules_weight parameter"),
+                            Err(v) => eprintln!("{}", v)
                          },
-                        "consolidate_matches" => if let Ok(Some(value)) = value.extract() {
-                            instance.data.consolidate_matches = value
+                        "variantmodel_weight" => match value.extract() {
+                            Ok(Some(value)) => instance.data.variantmodel_weight = value,
+                            Ok(None) => eprintln!("No value specified for variantmodel_weight parameter"),
+                            Err(v) => eprintln!("{}", v)
+                         },
+                        "context_weight" => match value.extract() {
+                            Ok(Some(value)) => instance.data.context_weight = value,
+                            Ok(None) => eprintln!("No value specified for context_weight parameter"),
+                            Err(v) => eprintln!("{}", v)
+                         },
+                        "consolidate_matches" => match value.extract() {
+                            Ok(Some(value)) => instance.data.consolidate_matches = value,
+                            Ok(None) => eprintln!("No value specified for consolidate_matches parameter"),
+                            Err(v) => eprintln!("{}", v)
                          },
                         _ => eprintln!("Ignored unknown kwargs option {}", key),
                     }
@@ -167,6 +220,12 @@ impl PySearchParameters {
             },
             libanaliticcl::DistanceThreshold::Ratio(value) => {
                 Ok(value.into_py(py).into_ref(py))
+            },
+            libanaliticcl::DistanceThreshold::RatioWithLimit(value, limit) => {
+                let dict = PyDict::new(py);
+                dict.set_item("ratio", value)?;
+                dict.set_item("limit", limit)?;
+                Ok( dict )
             }
         }
     }
@@ -178,6 +237,12 @@ impl PySearchParameters {
             },
             libanaliticcl::DistanceThreshold::Ratio(value) => {
                 Ok(value.into_py(py).into_ref(py))
+            },
+            libanaliticcl::DistanceThreshold::RatioWithLimit(value, limit) => {
+                let dict = PyDict::new(py);
+                dict.set_item("ratio", value)?;
+                dict.set_item("limit", limit)?;
+                Ok( dict )
             }
         }
     }
@@ -202,7 +267,11 @@ impl PySearchParameters {
     #[getter]
     fn get_variantmodel_weight(&self) -> PyResult<f32> { Ok(self.data.variantmodel_weight) }
     #[getter]
+    fn get_contextrules_weight(&self) -> PyResult<f32> { Ok(self.data.contextrules_weight) }
+    #[getter]
     fn get_consolidate_matches(&self) -> PyResult<bool> { Ok(self.data.consolidate_matches) }
+    #[getter]
+    fn get_unicodeoffsets(&self) -> PyResult<bool> { Ok(self.data.unicodeoffsets) }
 
     #[setter]
     fn set_max_anagram_distance(&mut self, value: &PyAny) -> PyResult<()> {
@@ -231,13 +300,38 @@ impl PySearchParameters {
     #[setter]
     fn set_lm_weight(&mut self, value: f32) -> PyResult<()> { self.data.lm_weight = value; Ok(()) }
     #[setter]
+    fn set_contextrules_weight(&mut self, value: f32) -> PyResult<()> { self.data.contextrules_weight = value; Ok(()) }
+    #[setter]
     fn set_variantmodel_weight(&mut self, value: f32) -> PyResult<()> { self.data.variantmodel_weight = value; Ok(()) }
 
     #[setter]
     fn set_consolidate_matches(&mut self, value: bool) -> PyResult<()> { self.data.consolidate_matches = value; Ok(()) }
 
     #[setter]
+    fn set_unicodeoffsets(&mut self, value: bool) -> PyResult<()> { self.data.unicodeoffsets = value; Ok(()) }
+
+    #[setter]
     fn set_stop_at_exact_match(&mut self, value: bool) -> PyResult<()> { if value { self.data.stop_criterion = libanaliticcl::StopCriterion::StopAtExactMatch; } else { self.data.stop_criterion = libanaliticcl::StopCriterion::Exhaustive; }; Ok(()) }
+
+    fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<&'py PyDict> {
+        let dict = PyDict::new(py);
+        dict.set_item("max_anagram_distance", self.get_max_anagram_distance(py)?)?;
+        dict.set_item("max_edit_distance", self.get_max_edit_distance(py)?)?;
+        dict.set_item("max_matches", self.get_max_matches()?)?;
+        dict.set_item("score_threshold", self.get_score_threshold()?)?;
+        dict.set_item("cutoff_threshold", self.get_cutoff_threshold()?)?;
+        dict.set_item("max_ngram", self.get_max_ngram()?)?;
+        dict.set_item("max_seq", self.get_max_seq()?)?;
+        dict.set_item("single_thread", self.get_single_thread()?)?;
+        dict.set_item("context_weight", self.get_context_weight()?)?;
+        dict.set_item("freq_weight", self.get_freq_weight()?)?;
+        dict.set_item("lm_weight", self.get_lm_weight()?)?;
+        dict.set_item("contextrules_weight", self.get_contextrules_weight()?)?;
+        dict.set_item("variantmodel_weight", self.get_variantmodel_weight()?)?;
+        dict.set_item("consolidate_matches", self.get_consolidate_matches()?)?;
+        dict.set_item("unicodeoffsets", self.get_unicodeoffsets()?)?;
+        Ok(dict)
+    }
 }
 
 #[pyclass(dict,name="VocabParams")]
@@ -318,7 +412,6 @@ impl PyVariantModel {
     fn variantresult_to_dict<'py>(&self, result: &libanaliticcl::VariantResult, freq_weight: f32, py: Python<'py>) -> PyResult<&'py PyDict> {
         let dict = PyDict::new(py);
         let vocabvalue = self.model.get_vocab(result.vocab_id).expect("getting vocab by id");
-        let lexicon = self.model.lexicons.get(vocabvalue.lexindex as usize).expect("valid lexicon index");
         dict.set_item("text", vocabvalue.text.as_str())?;
         dict.set_item("score", result.score(freq_weight))?;
         dict.set_item("dist_score", result.dist_score)?;
@@ -327,7 +420,14 @@ impl PyVariantModel {
             let viavalue = self.model.get_vocab(via_id).expect("getting vocab by id");
             dict.set_item("via", viavalue.text.as_str())?;
         }
-        dict.set_item("lexicon", lexicon.as_str())?;
+        let lexicons: Vec<&str> = self.model.lexicons.iter().enumerate().filter_map(|(i,name)| {
+            if vocabvalue.in_lexicon(i as u8) {
+                Some(name.as_str())
+            } else {
+                None
+            }
+        }).collect();
+        dict.set_item("lexicons", lexicons)?;
         Ok(dict)
     }
 }
@@ -370,6 +470,11 @@ impl PyVariantModel {
         }
     }
 
+    fn add_contextrule(&mut self, pattern: &str, score: f32, tag: Option<&str>, tagoffset: Option<&str>) -> PyResult<()> {
+        self.model.add_contextrule( pattern, score, tag, tagoffset);
+        Ok(())
+    }
+
     /// Higher order function to load a lexicon and make it available to the model.
     /// Wraps around read_vocabulary() with default parameters.
     fn read_lexicon(&mut self, filename: &str) -> PyResult<()> {
@@ -400,6 +505,14 @@ impl PyVariantModel {
     ///Load a confusable list
     fn read_confusablelist(&mut self, filename: &str) -> PyResult<()> {
         match self.model.read_confusablelist(filename) {
+            Ok(_) => Ok(()),
+            Err(e) => Err(PyRuntimeError::new_err(format!("{}", e)))
+        }
+    }
+
+    /// Load context rules from a TSV file
+    fn read_contextrules(&mut self, filename: &str) -> PyResult<()> {
+        match self.model.read_contextrules(filename) {
             Ok(_) => Ok(()),
             Err(e) => Err(PyRuntimeError::new_err(format!("{}", e)))
         }
@@ -458,6 +571,12 @@ impl PyVariantModel {
             offsetdict.set_item("begin", m.offset.begin)?;
             offsetdict.set_item("end", m.offset.end)?;
             odict.set_item("offset", offsetdict)?;
+            if let Some(tagindex) = m.tag {
+                odict.set_item("tag", self.model.tags.get(tagindex as usize).expect("Tag must exist") )?;
+                if let Some(seqnr) = m.seqnr {
+                    odict.set_item("seqnr", seqnr )?;
+                }
+            }
             let olist = PyList::empty(py);
             if let Some(variants) = m.variants {
                 if let Some(selected) = m.selected {

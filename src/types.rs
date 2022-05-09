@@ -57,22 +57,35 @@ impl Weights {
 pub enum DistanceThreshold {
     ///The distance threshold is expressed as a ratio of the total length of the text fragment under consideration, should be in range 0-1
     Ratio(f32),
+    ///Like ratio, but with a set absolute maximum
+    RatioWithLimit(f32,u8),
     ///Absolute distance threshold
     Absolute(u8)
+
 }
 
 impl FromStr for DistanceThreshold {
     type Err = std::io::Error;
 
     fn from_str(s: &str) -> Result<Self, std::io::Error> {
-        if let Ok(num) = s.parse::<u8>() {
+        if s.contains(";") {
+            let fields: Vec<&str> = s.split(";").collect();
+            if fields.len() == 2 {
+                if let Ok(ratio) = fields[0].parse::<f32>() {
+                    if let Ok(limit) = fields[1].parse::<u8>() {
+                        return Ok(Self::RatioWithLimit(ratio,limit));
+                    }
+                }
+            }
+            return Err(Error::new(ErrorKind::InvalidInput, "Expected a combination of a ratio (float) and and absolute maximum (integer) separated by a semicolon"));
+        } else if let Ok(num) = s.parse::<u8>() {
             return Ok(Self::Absolute(num));
         } else if let Ok(num) = s.parse::<f32>() {
             if num >= 0.0 && num <= 1.0 {
                 return Ok(Self::Ratio(num))
             }
         }
-        Err(Error::new(ErrorKind::InvalidInput, "Input must be integer (absolute threshold) or float between 0.0 and 1.0 (ratio)"))
+        Err(Error::new(ErrorKind::InvalidInput, "Input must be integer (absolute threshold) or float between 0.0 and 1.0 (ratio), or a combination of a ratio and and absolute maximum separated by a semicolon"))
     }
 }
 
@@ -115,19 +128,27 @@ pub struct SearchParameters {
     /// as much weight) when considering input context and rescoring.
     pub context_weight: f32,
 
+    /// Weight attributed to the variant model in finding the most likely sequence
+    pub variantmodel_weight: f32,
+
     /// Weight attributed to the language model in finding the most likely sequence
     pub lm_weight: f32,
+
+    /// Weight attributed to the context rules model in finding the most likely sequence
+    pub contextrules_weight: f32,
 
     /// Weight attributed to the frequency information in frequency reranking, in relation to
     /// the similarity component. 0 = disabled)
     pub freq_weight: f32,
 
-    /// Weight attributed to the variant model in finding the most likely sequence
-    pub variantmodel_weight: f32,
 
     /// Consolidate matches and extract a single most likely sequence, if set
     /// to false, all possible matches (including overlapping ones) are returned.
-    pub consolidate_matches: bool
+    pub consolidate_matches: bool,
+
+
+    /// Output text offsets in unicode points rather than UTF-8 byte offsets
+    pub unicodeoffsets: bool
 }
 
 impl Default for SearchParameters {
@@ -144,10 +165,12 @@ impl Default for SearchParameters {
             single_thread: false,
             max_seq: 250,
             context_weight: 0.0,
-            lm_weight: 1.0,
             freq_weight: 0.0,
-            variantmodel_weight: 1.0,
+            variantmodel_weight: 3.0,
+            lm_weight: 1.0,
+            contextrules_weight: 1.0,
             consolidate_matches: true,
+            unicodeoffsets: false,
         }
     }
 }
@@ -164,9 +187,11 @@ impl fmt::Display for SearchParameters {
         writeln!(f," single_thread={}",self.single_thread)?;
         writeln!(f," max_seq={}",self.max_seq)?;
         writeln!(f," freq_weight={}",self.freq_weight)?;
-        writeln!(f," lm_weight={}",self.lm_weight)?;
         writeln!(f," variantmodel_weight={}",self.variantmodel_weight)?;
-        writeln!(f," consolidate_matches={}",self.consolidate_matches)
+        writeln!(f," lm_weight={}",self.lm_weight)?;
+        writeln!(f," contextrules_weight={}",self.contextrules_weight)?;
+        writeln!(f," consolidate_matches={}",self.consolidate_matches)?;
+        writeln!(f," unicodeoffsets={}",self.unicodeoffsets)
     }
 }
 
@@ -207,6 +232,14 @@ impl SearchParameters {
         self.single_thread = true;
         self
     }
+    pub fn with_unicodeoffsets(mut self) -> Self {
+        self.unicodeoffsets = true;
+        self
+    }
+    pub fn with_utf8offsets(mut self) -> Self {
+        self.unicodeoffsets = false;
+        self
+    }
     pub fn with_context_weight(mut self, weight: f32) -> Self {
         self.context_weight = weight;
         self
@@ -219,8 +252,16 @@ impl SearchParameters {
         self.lm_order = order;
         self
     }
+    pub fn with_freq_weight(mut self, weight: f32) -> Self {
+        self.freq_weight = weight;
+        self
+    }
     pub fn with_variantmodel_weight(mut self, weight: f32) -> Self {
         self.variantmodel_weight = weight;
+        self
+    }
+    pub fn with_contextrules_weight(mut self, weight: f32) -> Self {
+        self.contextrules_weight = weight;
         self
     }
     pub fn with_consolidate_matches(mut self, value: bool) -> Self {
@@ -280,7 +321,7 @@ impl VariantResult {
         if freq_weight == 0.0 {
             self.dist_score
         } else {
-            (self.dist_score + (freq_weight as f64 * self.dist_score)) / (1.0+freq_weight as f64)
+            (self.dist_score + (freq_weight as f64 * self.freq_score)) / (1.0+freq_weight as f64)
         }
     }
 

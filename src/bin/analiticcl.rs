@@ -12,6 +12,13 @@ use rayon::prelude::*;
 
 use analiticcl::*;
 
+#[derive(Debug)]
+enum Resource<'a> {
+    Lexicon(&'a str),
+    VariantList(&'a str),
+    ErrorList(&'a str)
+}
+
 fn output_matches_as_tsv(model: &VariantModel, input: &str, variants: Option<&Vec<VariantResult>>, selected: Option<usize>, offset: Option<Offset>, output_lexmatch: bool, freq_weight: f32) {
     print!("{}",input);
     if let Some(offset) = offset {
@@ -37,72 +44,108 @@ fn output_result_as_tsv(model: &VariantModel, result: &VariantResult, output_lex
     let vocabvalue = model.get_vocab(result.vocab_id).expect("getting vocab by id");
     print!("\t{}\t{}\t", vocabvalue.text, result.score(freq_weight));
     if  output_lexmatch {
-        print!("\t{}", model.lexicons.get(vocabvalue.lexindex as usize).expect("valid lexicon index"));
+        let lexicons: Vec<&str> = model.lexicons.iter().enumerate().filter_map(|(i,name)| {
+            if vocabvalue.in_lexicon(i as u8) {
+                Some(name.as_str())
+            } else {
+                None
+            }
+        }).collect();
+        print!("\t\"{}\"", lexicons.join(";"));
     }
 }
 
-fn output_matches_as_json(model: &VariantModel, input: &str, variants: Option<&Vec<VariantResult>>, selected: Option<usize>, offset: Option<Offset>, output_lexmatch: bool, freq_weight: f32, seqnr: usize) {
+fn output_matches_as_json(model: &VariantModel, input: &str, variants: Option<&Vec<VariantResult>>, selected: Option<usize>, offset: Option<Offset>, output_lexmatch: bool, freq_weight: f32, seqnr: usize, tag: Option<u16>, tag_seqnr: Option<u8>) {
     if seqnr > 1 {
-        println!(",")
+        print!("    ,")
+    } else {
+        print!("    ")
     }
-    print!("    {{ \"input\": \"{}\"", input.replace("\"","\\\"").as_str());
+    print!("{{ \"input\": \"{}\"", input.replace("\"","\\\"").as_str());
     if let Some(offset) = offset {
         print!(", \"begin\": {}, \"end\": {}", offset.begin, offset.end);
     }
+    if let Some(tag) = tag {
+        print!(", \"tag\": \"{}\"", model.tags.get(tag as usize).expect("tag must exist in model") );
+        if let Some(tag_seqnr) = tag_seqnr {
+            print!(", \"seqnr\": {}",tag_seqnr);
+        }
+    }
     if let Some(variants) = variants {
         println!(", \"variants\": [ ");
-        let l = variants.len();
+        let mut wroteoutput = false;
         if let Some(selected) = selected {
             if let Some(result) = variants.get(selected) {
-                output_result_as_json(&model, &result, output_lexmatch, freq_weight, l - 1 == 0);
+                if wroteoutput {
+                    println!(",");
+                }
+                output_result_as_json(&model, &result, output_lexmatch, freq_weight);
+                wroteoutput = true;
             }
         }
         for (i, result) in variants.iter().enumerate() {
             if selected.is_none() || selected.unwrap() != i { //output all others
-                output_result_as_json(&model, &result, output_lexmatch, freq_weight, l - 1 == i);
+                if wroteoutput {
+                    println!(",");
+                }
+                output_result_as_json(&model, &result, output_lexmatch, freq_weight);
+                wroteoutput = true;
             }
         }
+        println!("");
         println!("    ] }}");
     } else {
         println!(" }}");
     }
 }
 
-fn output_result_as_json(model: &VariantModel, result: &VariantResult, output_lexmatch: bool, freq_weight: f32, last: bool) {
+fn output_result_as_json(model: &VariantModel, result: &VariantResult, output_lexmatch: bool, freq_weight: f32) {
     let vocabvalue = model.get_vocab(result.vocab_id).expect("getting vocab by id");
     print!("        {{ \"text\": \"{}\", \"score\": {}", vocabvalue.text.replace("\"","\\\""), result.score(freq_weight));
     print!(", \"dist_score\": {}", result.dist_score);
     print!(", \"freq_score\": {}", result.freq_score);
     if let Some(via_id) = result.via {
         let viavalue = model.get_vocab(via_id).expect("getting vocab by id");
-        print!(", \"via\": {}", viavalue.text.replace("\"","\\\""));
+        print!(", \"via\": \"{}\"", viavalue.text.replace("\"","\\\""));
     }
     if  output_lexmatch {
-        print!(", \"lexicon\": \"{}\"", model.lexicons.get(vocabvalue.lexindex as usize).expect("valid lexicon index"));
+        let lexicons: Vec<String> = model.lexicons.iter().enumerate().filter_map(|(i,name)| {
+            if vocabvalue.in_lexicon(i as u8) {
+                Some(format!("\"{}\"", name.replace("\"","\\\"")))
+            } else {
+                None
+            }
+        }).collect();
+        print!(", \"lexicons\": [ {} ]", lexicons.join(", "));
     }
-    if last {
-        println!(" }}");
-    } else {
-        println!(" }},");
-    }
+    print!(" }}");
 }
 
 
 ///auxiliary function outputting a single variant
-fn output_weighted_variant_as_tsv(text: &str, score: f64, lexindex: u8, multioutput: bool, outfiles: &mut HashMap<u8,File>, model: &VariantModel) {
+fn output_weighted_variant_as_tsv(text: &str, score: f64, freq: u32, lexindex: u32, multioutput: bool, outfiles: &mut HashMap<u8,File>, model: &VariantModel) {
     if multioutput {
-        let f = if let Some(f) = outfiles.get_mut(&lexindex) {
-            f
-        } else {
-            let filename: String = format!("{}.variants.tsv", model.lexicons.get(lexindex as usize).expect("lexindex must exist"));
-            if let Ok(f) = File::create(filename.as_str()) {
-                outfiles.insert(lexindex, f);
-                outfiles.get_mut(&lexindex).expect("outfile must be prepared")
+        for lexindex in model.lexicons.iter().enumerate().filter_map(|(i,_name)| {
+            if lexindex as usize & (1 << i) == i << i {
+                Some(i)
             } else {
-                panic!("unable to write to {}", filename.as_str());
+                None
             }
-        };
-        f.write(format!("\t{}\t{}\n", text, score).as_bytes()).expect("error writing to file");
+        }) {
+            let lexindex = lexindex as u8;
+            let f = if let Some(f) = outfiles.get_mut(&lexindex) {
+                f
+            } else {
+                let filename: String = format!("{}.variants.tsv", model.lexicons.get(lexindex as usize).expect("lexindex must exist"));
+                if let Ok(f) = File::create(filename.as_str()) {
+                    outfiles.insert(lexindex, f);
+                    outfiles.get_mut(&lexindex).expect("outfile must be prepared")
+                } else {
+                    panic!("unable to write to {}", filename.as_str());
+                }
+            };
+            f.write(format!("\t{}\t{}\t{}\n", text, score, freq).as_bytes()).expect("error writing to file");
+        }
     } else {
         print!("\t{}\t{}", text, score);
     }
@@ -112,55 +155,78 @@ fn output_weighted_variant_as_tsv(text: &str, score: f64, lexindex: u8, multiout
 /// Outputs weighted variants stored in the model as tsv
 fn output_weighted_variants_as_tsv(model: &VariantModel, multioutput: bool) {
     let mut outfiles: HashMap<u8,File> = HashMap::new();
+    let mut first;
     for vocabitem in model.decoder.iter() {
         if let Some(variants) = &vocabitem.variants {
-            print!("{}", vocabitem.text);
+            first = true;
             for variant in variants {
                 if let VariantReference::ReferenceFor((vocab_id, score)) = variant {
+                    if first {
+                        print!("{}", vocabitem.text);
+                        first = false;
+                    }
                     let variantitem = model.decoder.get(*vocab_id as usize).expect("vocab id must exist");
-                    output_weighted_variant_as_tsv(&variantitem.text, *score, variantitem.lexindex, multioutput, &mut outfiles, model);
+                    output_weighted_variant_as_tsv(&variantitem.text, *score, variantitem.frequency, variantitem.lexindex, multioutput, &mut outfiles, model);
                 }
             }
-            println!();
+            if !first {
+                println!();
+            }
         }
     }
 }
 
 ///auxiliary function outputting a single variant
-fn output_weighted_variant_as_json(text: &str, score: f64, lexindex: u8, multioutput: bool, outfiles: &mut HashMap<u8,File>, model: &VariantModel) {
+fn output_weighted_variant_as_json(text: &str, score: f64, freq: u32, lexindex: u32, multioutput: bool, outfiles: &mut HashMap<u8,File>, model: &VariantModel) {
     if multioutput {
-        let f = if let Some(f) = outfiles.get_mut(&lexindex) {
-            f
-        } else {
-            let filename: String = format!("{}.variants.json", model.lexicons.get(lexindex as usize).expect("lexindex must exist"));
-            if let Ok(f) = File::create(filename.as_str()) {
-                outfiles.insert(lexindex, f);
-                outfiles.get_mut(&lexindex).expect("outfile must be prepared")
+        for lexindex in model.lexicons.iter().enumerate().filter_map(|(i,_name)| {
+            if lexindex as usize & (1 << i) == 1 << i {
+                Some(i)
             } else {
-                panic!("unable to write to {}", filename.as_str());
+                None
             }
-        };
-        f.write(format!("        {{ \"text\": \"{}\", \"score\": {} }}, ", text.replace("\"","\\\""), score).as_bytes()).expect("error writing to file");
+        }) {
+            let lexindex = lexindex as u8;
+            let f = if let Some(f) = outfiles.get_mut(&lexindex) {
+                f
+            } else {
+                let filename: String = format!("{}.variants.json", model.lexicons.get(lexindex as usize).expect("lexindex must exist"));
+                if let Ok(f) = File::create(filename.as_str()) {
+                    outfiles.insert(lexindex, f);
+                    outfiles.get_mut(&lexindex).expect("outfile must be prepared")
+                } else {
+                    panic!("unable to write to {}", filename.as_str());
+                }
+            };
+            f.write(format!("        {{ \"text\": \"{}\",  \"score\": {}, \"freq\": {} }}, ", text.replace("\"","\\\""), freq, score).as_bytes()).expect("error writing to file");
+        }
     } else {
-        println!("        {{ \"text\": \"{}\", \"score\": {} }}, ", text.replace("\"","\\\""), score);
+        println!("        {{ \"text\": \"{}\", \"score\": {}, \"freq\": {} }}, ", text.replace("\"","\\\""), score, freq);
     }
 }
 
 /// Outputs weighted variants stored in the model as tsv
 fn output_weighted_variants_as_json(model: &VariantModel, multioutput: bool) {
     let mut outfiles: HashMap<u8,File> = HashMap::new();
+    let mut first;
     println!("{{");
     for vocabitem in model.decoder.iter() {
-        println!("    \"{}\": [ ", vocabitem.text.replace("\"","\\\"").as_str());
+        first = true;
         if let Some(variants) = &vocabitem.variants {
             for variant in variants {
                 if let VariantReference::ReferenceFor((vocab_id, score)) = variant {
+                    if first {
+                        println!("    \"{}\": [ ", vocabitem.text.replace("\"","\\\"").as_str());
+                        first = false;
+                    }
                     let variantitem = model.decoder.get(*vocab_id as usize).expect("vocab id must exist");
-                    output_weighted_variant_as_json(&variantitem.text, *score, variantitem.lexindex, multioutput, &mut outfiles, model);
+                    output_weighted_variant_as_json(&variantitem.text, *score, variantitem.frequency, variantitem.lexindex, multioutput, &mut outfiles, model);
                 }
             }
         }
-        println!("    ]");
+        if !first {
+            println!("    ]");
+        }
     }
     println!("}}")
 }
@@ -177,7 +243,7 @@ fn process(model: &VariantModel, inputstream: impl Read, searchparams: &SearchPa
             }
             let variants = model.find_variants(&input, searchparams);
             if json {
-                output_matches_as_json(model, &input, Some(&variants), Some(0), None, output_lexmatch, searchparams.freq_weight, seqnr);
+                output_matches_as_json(model, &input, Some(&variants), Some(0), None, output_lexmatch, searchparams.freq_weight, seqnr, None, None);
             } else {
                 //Normal output mode
                 output_matches_as_tsv(model, &input, Some(&variants), Some(0), None,  output_lexmatch, searchparams.freq_weight);
@@ -216,7 +282,7 @@ fn process_par(model: &VariantModel, inputstream: impl Read, searchparams: &Sear
         for (input, variants) in output {
             seqnr += 1;
             if json {
-                output_matches_as_json(model, &input, Some(&variants), Some(0), None, output_lexmatch, searchparams.freq_weight, seqnr);
+                output_matches_as_json(model, &input, Some(&variants), Some(0), None, output_lexmatch, searchparams.freq_weight, seqnr, None, None);
             } else {
                 //Normal output mode
                 output_matches_as_tsv(model, &input, Some(&variants), Some(0), None, output_lexmatch, searchparams.freq_weight);
@@ -229,20 +295,60 @@ fn process_par(model: &VariantModel, inputstream: impl Read, searchparams: &Sear
     Ok(())
 }
 
-fn process_learn(model: &mut VariantModel, inputstream: impl Read, searchparams: &SearchParameters, iterations: u8, json: bool, multioutput: bool ) -> io::Result<()> {
+fn process_learn(model: &mut VariantModel, inputstream: impl Read, searchparams: &SearchParameters, iterations: u8, json: bool, multioutput: bool, strict: bool, newline_as_space: bool, per_line: bool) -> io::Result<()> {
     let f_buffer = BufReader::new(inputstream);
     let mut line_iter = f_buffer.lines();
-    let mut batch = vec![]; //batch for learning contains all input data at once
+    let mut lines = vec![]; //load all lines in memory
     while let Some(Ok(input)) = line_iter.next() {
-        batch.push((input,None));
+        lines.push(input);
     }
-    let batch_size = batch.len();
-    for i in 0..iterations {
-        let (count, unknown) = model.learn_variants(&batch, searchparams, true);
-        eprintln!("(Iteration #{}: learned {} variants, unable to match {} input strings out of a total of {})", i+1, count, unknown, batch_size);
-        if count == 0 && i+1 < iterations {
-            eprintln!("(Halting further iterations)");
-            break;
+    if strict {
+        //batch for learning in strict mode simply contains all input data at once
+        let batch_size = lines.len();
+        for i in 0..iterations {
+            let count = model.learn_variants(&lines, searchparams, strict, true);
+            eprintln!("(Iteration #{}: learned {} variants (out of a total of {} input strings)", i+1, count, batch_size);
+            if count == 0 && i+1 < iterations {
+                eprintln!("(Halting further iterations)");
+                break;
+            }
+        }
+    } else {
+        for i in 0..iterations {
+            let mut eof = false;
+            let mut line_iter = lines.iter();
+            while !eof {
+                let mut batch = String::new();
+                for j in 0..MAX_BATCHSIZE_SEARCH {
+                    if let Some(input) = line_iter.next() {
+                        if j > 0 {
+                            batch.push(if newline_as_space {
+                                            ' '
+                                       } else {
+                                            '\n'
+                                       });
+                        }
+                        let empty = input.is_empty();
+                        batch.extend(input.chars());
+                        if empty || per_line {
+                            //an empty line is a good breakpoint for a batch
+                            break;
+                        }
+                    } else {
+                        eof = true;
+                        break;
+                    }
+                    if batch.is_empty() {
+                        break;
+                    }
+                }
+            }
+            let count = model.learn_variants(&lines, searchparams, strict, true);
+            eprintln!("(Iteration #{}: learned {} variants", i+1, count);
+            if count == 0 && i+1 < iterations {
+                eprintln!("(Halting further iterations)");
+                break;
+            }
         }
     }
     if json {
@@ -295,7 +401,7 @@ fn process_search(model: &VariantModel, inputstream: impl Read, searchparams: &S
         for result_match in output {
             seqnr += 1;
             if json {
-                output_matches_as_json(model, result_match.text, result_match.variants.as_ref(), result_match.selected, Some(result_match.offset), output_lexmatch, searchparams.freq_weight, seqnr);
+                output_matches_as_json(model, result_match.text, result_match.variants.as_ref(), result_match.selected, Some(result_match.offset), output_lexmatch, searchparams.freq_weight, seqnr, result_match.tag, result_match.seqnr);
             } else {
                 //Normal output mode
                 output_matches_as_tsv(model, result_match.text, result_match.variants.as_ref(), result_match.selected, Some(result_match.offset), output_lexmatch, searchparams.freq_weight);
@@ -442,13 +548,13 @@ pub fn common_arguments<'a,'b>() -> Vec<clap::Arg<'a,'b>> {
     args.push(Arg::with_name("max-anagram-distance")
         .long("max-anagram-distance")
         .short("k")
-        .help("Maximum anagram distance. Can either be an absolute value (integer), or a ratio of the input length (float between 0.0 and 1.0). The anagram distance impacts the size of the search space. Each insertion or deletion has cost 1, substitutions can not be separately tracked so they counts as 2 (deletion+insertion). It is therefore recommended to set this value slightly higher than the max edit distance.")
+        .help("Maximum anagram distance. Can either be an absolute value (integer), or a ratio of the input length (float between 0.0 and 1.0), or a combination of a ratio with an absolute maximum, separated by a semicolon (ratio;limit). The anagram distance impacts the size of the search space. Each insertion or deletion has cost 1, substitutions can not be separately tracked so they counts as 2 (deletion+insertion). It is therefore recommended to set this value slightly higher than the max edit distance.")
         .takes_value(true)
         .default_value("3"));
     args.push(Arg::with_name("max-edit-distance")
         .long("max-edit-distance")
         .short("d")
-        .help("Maximum edit distance (levenshtein-damarau). The maximum edit distance according to Levenshtein-Damarau. Can either be an absolute value (integer), or a ratio of the input length (float between 0.0 and 1.0) so longer inputs use a higher edit distance than short ones. Insertions, deletions, substitutions and transposition all have the same cost (1). It is recommended to set this value slightly lower than the maximum anagram distance.")
+        .help("Maximum edit distance (levenshtein-damerau). The maximum edit distance according to Levenshtein-Damarau. Can either be an absolute value (integer), or a ratio of the input length (float between 0.0 and 1.0), or a combination of a ratio with an absolute maximum, separated by a semicolon (ratio;limit). When a ratio is expressed, longer inputs use a higher edit distance than shorter ones. Insertions, deletions, substitutions and transposition all have the same cost (1). It is recommended to set this value slightly lower than the maximum anagram distance.")
         .takes_value(true)
         .default_value("2"));
     args.push(Arg::with_name("max-matches")
@@ -457,6 +563,10 @@ pub fn common_arguments<'a,'b>() -> Vec<clap::Arg<'a,'b>> {
         .help("Number of matches to return per input (set to 0 for unlimited if you want to exhaustively return every possibility within the specified anagram and edit distance)")
         .takes_value(true)
         .default_value("10"));
+    args.push(Arg::with_name("unicodeoffsets")
+        .long("unicode-offsets")
+        .short("u")
+        .help("Output all text offsets in unicode points rather than UTF-8 byte offsets"));
     args.push(Arg::with_name("files")
         .help("Input files")
         .takes_value(true)
@@ -465,10 +575,70 @@ pub fn common_arguments<'a,'b>() -> Vec<clap::Arg<'a,'b>> {
     args
 }
 
+pub fn search_arguments<'a,'b>() -> Vec<clap::Arg<'a,'b>> {
+    let mut args: Vec<Arg> = Vec::new();
+        args.push(Arg::with_name("per-line")
+            .long("per-line")
+            .help("Will process per line; assumes each line holds a complete unit (e.g. sentence or paragraph) and that n-grams never cross line boundaires"));
+        args.push(Arg::with_name("retain-linebreaks")
+            .long("retain-linebreaks")
+            .help("Retain linebreaks (newline), the default is to treat them as if they were spaces. Retaining them assumes you have a newline as part of your alphabet."));
+        args.push(Arg::with_name("max-ngram-order")
+            .long("max-ngram-order")
+            .short("N")
+            .help("Maximum ngram order for variant lookup (1 for unigrams, 2 for bigrams, etc..)")
+            .takes_value(true)
+            .default_value("3"));
+        args.push(Arg::with_name("max-seq")
+            .long("max-seq")
+            .short("Q")
+            .help("Maximum number of candidate sequences to take along to the language modelling stage")
+            .takes_value(true)
+            .default_value("250"));
+        args.push(Arg::with_name("lm")
+            .long("lm")
+            .help("Language model, a corpus-derived list of n-grams with absolute frequency counts. This is a TSV file containing the the ngram in the first column (space character acts as token separator), and the absolute frequency count in the second column. It is also recommended it contains the special tokens <bos> (begin of sentence) and <eos> end of sentence. The items in this list are NOT used for variant matching, use --corpus or even --lexicon instead if you want to also match against these items. Conversely, files provides through --lexicon and --corpus and other options are NOT used for language modelling.")
+            .takes_value(true)
+            .number_of_values(1)
+            .multiple(true));
+        args.push(Arg::with_name("lm-order")
+            .long("lm-order")
+            .short("L")
+            .help("N-gram order for Language models (2 for bigrams, 3 for trigrams, etc..)")
+            .takes_value(true)
+            .default_value("3"));
+        args.push(Arg::with_name("weight-lm")
+            .long("weight-lm")
+            .help("Weight attributed to the language model in finding the most likely sequence in search mode")
+            .takes_value(true)
+            .default_value("1.0"));
+        args.push(Arg::with_name("weight-variant-model")
+            .long("weight-variant-model")
+            .help("Weight attributed to the variant model in finding the most likely sequence in search mode")
+            .takes_value(true)
+            .default_value("3.0"));
+        args.push(Arg::with_name("weight-contextrules")
+            .long("weight-contextrules")
+            .help("Weight attributed to the context rules model in finding the most likely sequence in search mode")
+            .takes_value(true)
+            .default_value("1.0"));
+        args.push(Arg::with_name("weight-context")
+            .long("weight-context")
+            .help("For rescoring against input context using a language model: weight attributed to the language model in relation to the variant model. (0=disabled, default, 1.0=equal weight, 0.5=half as strong as the variant model). Setting this forces consideration of input context in an earlier stage. Only relevant for search mode.")
+            .takes_value(true)
+            .default_value("0.0"));
+        args.push(Arg::with_name("allow-overlap")
+            .long("allow-overlap")
+            .help("Do not consolidate multiple matches by finding a most likely sequence, but simply return all matches as-is, even if they overlap.")
+            .takes_value(false));
+    args
+}
+
+const VERSION: &'static str = env!("CARGO_PKG_VERSION");
 
 fn main() {
     let rootargs = App::new("Analiticcl")
-                    .version("0.3.0")
+                    .version(VERSION)
                     .author("Maarten van Gompel (proycon) <proycon@anaproy.nl>")
                     .about("Spelling variant matching / approximate string matching / fuzzy search")
                     .subcommand(
@@ -485,55 +655,7 @@ fn main() {
                         SubCommand::with_name("search")
                             .about("Search entire text input and find and output all possible matches")
                             .args(&common_arguments())
-                            .arg(Arg::with_name("per-line")
-                                .long("per-line")
-                                .help("Will process per line; assumes each line holds a complete unit (e.g. sentence or paragraph) and that n-grams never cross line boundaires"))
-                            .arg(Arg::with_name("retain-linebreaks")
-                                .long("retain-linebreaks")
-                                .help("Retain linebreaks (newline), the default is to treat them as if they were spaces. Retaining them assumes you have a newline as part of your alphabet."))
-                            .arg(Arg::with_name("max-ngram-order")
-                                .long("max-ngram-order")
-                                .short("N")
-                                .help("Maximum ngram order for variant lookup (1 for unigrams, 2 for bigrams, etc..)")
-                                .takes_value(true)
-                                .default_value("3"))
-                            .arg(Arg::with_name("max-seq")
-                                .long("max-seq")
-                                .short("Q")
-                                .help("Maximum number of candidate sequences to take along to the language modelling stage")
-                                .takes_value(true)
-                                .default_value("250"))
-                            .arg(Arg::with_name("lm")
-                                .long("lm")
-                                .help("Language model, a corpus-derived list of n-grams with absolute frequency counts. This is a TSV file containing the the ngram in the first column (space character acts as token separator), and the absolute frequency count in the second column. It is also recommended it contains the special tokens <bos> (begin of sentence) and <eos> end of sentence. The items in this list are NOT used for variant matching, use --corpus or even --lexicon instead if you want to also match against these items. Conversely, files provides through --lexicon and --corpus and other options are NOT used for language modelling.")
-                                .takes_value(true)
-                                .number_of_values(1)
-                                .multiple(true))
-                            .arg(Arg::with_name("lm-order")
-                                .long("lm-order")
-                                .short("L")
-                                .help("N-gram order for Language models (2 for bigrams, 3 for trigrams, etc..)")
-                                .takes_value(true)
-                                .default_value("3"))
-                            .arg(Arg::with_name("weight-lm")
-                                .long("weight-lm")
-                                .help("Weight attributed to the language model in finding the most likely sequence in search mode")
-                                .takes_value(true)
-                                .default_value("1.0"))
-                            .arg(Arg::with_name("weight-variant-model")
-                                .long("weight-variant-model")
-                                .help("Weight attributed to the variant model in finding the most likely sequence in search mode")
-                                .takes_value(true)
-                                .default_value("1.0"))
-                            .arg(Arg::with_name("weight-context")
-                                .long("weight-context")
-                                .help("For rescoring against input context using a language model: weight attributed to the language model in relation to the variant model. (0=disabled, default, 1.0=equal weight, 0.5=half as strong as the variant model). Setting this forces consideration of input context in an earlier stage. Only relevant for search mode.")
-                                .takes_value(true)
-                                .default_value("0.0"))
-                            .arg(Arg::with_name("allow-overlap")
-                                .long("allow-overlap")
-                                .help("Do not consolidate multiple matches by finding a most likely sequence, but simply return all matches as-is, even if they overlap.")
-                                .takes_value(false))
+                            .args(&search_arguments())
                     )
                     .subcommand(
                         SubCommand::with_name("learn")
@@ -549,6 +671,10 @@ fn main() {
                                 .short("O")
                                 .long("multi-output")
                                 .help("Output to multiple (weighted) variant lists rather than to standard output, each variant lists corresponds to an input lexicon. This allows keeping the link with the original lexicon."))
+                            .arg(Arg::with_name("strict")
+                                .long("strict")
+                                .help("Strict learning: the input is to learn from is itself a list or lexicon, one item per line. This offers a more controlled form of learning that produces better results."))
+                            .args(&search_arguments())
                     )
                     .arg(Arg::with_name("debug")
                         .long("debug")
@@ -569,7 +695,8 @@ fn main() {
     } else if let Some(args) = rootargs.subcommand_matches("search") {
         args
     } else {
-       panic!("No command specified");
+       eprintln!("No command specified, please see analiticcl --help");
+       exit(2);
     };
 
     let weights = Weights {
@@ -587,31 +714,52 @@ fn main() {
         rootargs.value_of("debug").unwrap_or("0").parse::<u8>().expect("Debug level should be integer in range 0-4")
     );
 
+
     eprintln!("Loading lexicons...");
 
+    //Gathering everything to load, in the exact order specified
+    let mut resources: Vec<(usize, Resource)> = Vec::new();
+
     if args.is_present("lexicon") {
-        for filename in args.values_of("lexicon").unwrap().collect::<Vec<&str>>() {
-            model.read_vocabulary(filename, &VocabParams::default()).expect(&format!("Error reading lexicon {}", filename));
+        let lexicons = args.values_of("lexicon").unwrap().collect::<Vec<&str>>();
+        let lexicon_indices = args.indices_of("lexicon").unwrap().collect::<Vec<usize>>();
+        for (filename, index) in lexicons.iter().zip(lexicon_indices) {
+            resources.push((index, Resource::Lexicon(filename)));
         }
     }
+    if args.is_present("variants") {
+        let variantlists = args.values_of("variants").unwrap().collect::<Vec<&str>>();
+        let variantlist_indices = args.indices_of("variants").unwrap().collect::<Vec<usize>>();
+        for (filename, index) in variantlists.iter().zip(variantlist_indices) {
+            resources.push((index, Resource::VariantList(filename)));
+        }
+    }
+
+    if args.is_present("errors") {
+        let errorlists = args.values_of("errors").unwrap().collect::<Vec<&str>>();
+        let errorlist_indices = args.indices_of("errors").unwrap().collect::<Vec<usize>>();
+        for (filename, index) in errorlists.iter().zip(errorlist_indices) {
+            resources.push((index, Resource::ErrorList(filename)));
+        }
+    }
+
+    //sort by index
+    resources.sort_by_key(|x| x.0);
+
+    for (_, resource) in resources {
+        match resource {
+            Resource::Lexicon(filename) => model.read_vocabulary(filename, &VocabParams::default()).expect(&format!("Error reading lexicon {}", filename)),
+            Resource::VariantList(filename) => model.read_variants(filename, Some(&VocabParams::default()), false).expect(&format!("Error reading weighted variant list {}", filename)),
+            Resource::ErrorList(filename) => model.read_variants(filename, Some(&VocabParams::default()), true).expect(&format!("Error reading weighted variant list {}", filename)),
+        }
+    }
+
     if args.is_present("lm") {
         for filename in args.values_of("lm").unwrap().collect::<Vec<&str>>() {
             model.read_vocabulary(filename, &VocabParams {
                 vocab_type: VocabType::LM,
                 ..Default::default()
             }).expect(&format!("Error reading lm {}", filename));
-        }
-    }
-
-    if args.is_present("variants") {
-        for filename in args.values_of("variants").unwrap().collect::<Vec<&str>>() {
-            model.read_variants(filename, Some(&VocabParams::default()), false).expect(&format!("Error reading weighted variant list {}", filename));
-        }
-    }
-
-    if args.is_present("errors") {
-        for filename in args.values_of("errors").unwrap().collect::<Vec<&str>>() {
-            model.read_variants(filename, Some(&VocabParams::default()), true).expect(&format!("Error reading error list {}", filename));
         }
     }
 
@@ -676,11 +824,17 @@ fn main() {
         } else {
             1.0
         },
+        contextrules_weight: if args.is_present("weight-contextrules") {
+            args.value_of("weight-contextrules").unwrap().parse::<f32>().expect("Context-rules weight should be a floating point number")
+        } else {
+            1.0
+        },
         max_seq: if args.is_present("max-seq") {
             args.value_of("max-seq").unwrap().parse::<usize>().expect("max-seq must be an integer")
         } else {
             250
         },
+        unicodeoffsets: args.is_present("unicode-offsets")
     };
 
 
@@ -735,7 +889,7 @@ fn main() {
                     let stdin = io::stdin();
                     if rootargs.subcommand_matches("learn").is_some() {
                         let iterations = args.value_of("iterations").unwrap().parse::<u8>().expect("Iterations should be an integer between 0 and 255");
-                        process_learn(&mut model, stdin, &searchparams,  iterations, json, args.is_present("multi-output")).expect("I/O Error");
+                        process_learn(&mut model, stdin, &searchparams,  iterations, json, args.is_present("multi-output"), args.is_present("strict"), !retain_linebreaks, perline).expect("I/O Error");
                     } else if rootargs.subcommand_matches("search").is_some() {
                         eprintln!("(accepting standard input; enter text to search for variants, output may be delayed until end of input, enter an empty line to force output earlier)");
                         process_search(&model, stdin, &searchparams, output_lexmatch, json, progress, !retain_linebreaks, perline);
@@ -752,7 +906,7 @@ fn main() {
                     let f = File::open(filename).expect(format!("ERROR: Unable to open file {}", filename).as_str());
                     if rootargs.subcommand_matches("learn").is_some() {
                         let iterations = args.value_of("iterations").unwrap().parse::<u8>().expect("Iterations should be an integer between 0 and 255");
-                        process_learn(&mut model, f, &searchparams, iterations, json, args.is_present("multi-output")).expect("I/O Error");
+                        process_learn(&mut model, f, &searchparams, iterations, json, args.is_present("multi-output"), args.is_present("strict"), !retain_linebreaks, perline).expect("I/O Error");
                     } else if rootargs.subcommand_matches("search").is_some() {
                         process_search(&model, f, &searchparams, output_lexmatch, json, progress, !retain_linebreaks, perline);
                     } else if searchparams.single_thread {

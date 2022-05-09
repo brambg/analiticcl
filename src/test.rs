@@ -60,8 +60,10 @@ pub fn get_test_searchparams() -> SearchParameters {
         single_thread: true,
         context_weight: 0.0,
         lm_weight: 1.0,
-        variantmodel_weight: 1.0,
+        variantmodel_weight: 3.0,
+        contextrules_weight: 1.0,
         max_seq: 250,
         consolidate_matches: true,
+        unicodeoffsets: false,
     }
 }

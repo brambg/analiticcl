@@ -1,5 +1,5 @@
 use crate::types::*;
-
+use crate::vocab::*;
 
 pub const TRANSITION_SMOOTHING_LOGPROB: f32 = -13.815510557964274;
 
@@ -10,6 +10,13 @@ pub struct Offset {
     pub begin: usize,
     ///End offset
     pub end: usize,
+}
+
+impl Offset {
+    pub fn convert(&mut self, map: &Vec<Option<usize>>) {
+        self.begin = map.get(self.begin).expect(format!("Offset {} must exist in map",self.begin).as_str()).expect("Offset in map may not be None");
+        self.end = map.get(self.end).expect(format!("Offset {} must exist in map",self.end).as_str()).expect("Offset in map may not be None");
+    }
 }
 
 /// Represents a match between the input text and the lexicon.
@@ -26,6 +33,12 @@ pub struct Match<'a> {
 
     ///the variant that was selected after searching and ranking (if any)
     pub selected: Option<usize>,
+
+
+    /// The tag that was assigned to this match (if any)
+    pub tag: Option<u16>,
+    /// The sequence number in a tagged sequence
+    pub seqnr: Option<u8>,
 
     /// the index of the previous boundary, None if at start position
     pub prevboundary: Option<usize>,
@@ -46,6 +59,8 @@ impl<'a> Match<'a> {
             selected: None,
             prevboundary: None,
             nextboundary: None,
+            tag: None,
+            seqnr: None,
             n: 0
         }
     }
@@ -126,6 +141,8 @@ pub struct Sequence {
     pub variant_cost: f32,
     pub lm_logprob: f32,
     pub perplexity: f64,
+    pub context_score: f64,
+    pub tags: Vec<Option<(u16,u8)>> //tag + sequence number
 }
 
 impl Sequence {
@@ -135,6 +152,8 @@ impl Sequence {
             variant_cost,
             lm_logprob: 0.0,
             perplexity: 0.0,
+            context_score: 1.0,
+            tags: Vec::new()
         }
     }
 
@@ -289,4 +308,193 @@ pub fn redundant_match<'a>(candidate: &Match<'a>, matches: &[Match<'a>]) -> bool
     true
 }
 
+#[derive(Clone)]
+pub enum PatternMatch {
+    /// Exact match with specific vocabulary
+    Vocab(VocabId),
+    /// Match with anything (?)
+    Any,
+    /// Match only if not found in any lexicon (^)
+    NoLexicon,
+    /// Match with a specific lexicon (@)
+    FromLexicon(u8),
+    /// Negation (^)
+    Not(Box<PatternMatch>),
+    /// Disjunction (|)
+    Disjunction(Box<Vec<PatternMatch>>)
+}
 
+
+#[derive(Clone)]
+pub struct ContextRule {
+    /// Lexicon index
+    pub pattern: Vec<PatternMatch>,
+    /// Score (> 1.0) for bonus, (< 1.0) for penalty
+    pub score: f32,
+    pub tag: Option<u16>,
+    pub tagoffset: Option<(u8,u8)> //begin,length
+}
+
+#[derive(Clone)]
+pub struct PatternMatchResult {
+    pub score: f32,
+    pub tag: Option<u16>,
+    pub seqnr: u8,
+}
+
+impl PatternMatch {
+    pub fn matches(&self, sequence: &[(VocabId,u32)], index: usize) -> bool {
+        match self {
+            PatternMatch::Any => {
+                return true;
+            },
+            PatternMatch::NoLexicon =>  {
+                if let Some((vocabid, lexindex)) = sequence.get(index) {
+                    if *lexindex == 0 || *vocabid == 0 {
+                        return true;
+                    }
+                }
+            },
+            PatternMatch::Vocab(testvocabid) => {
+                if let Some((vocabid, _lexindex)) = sequence.get(index) {
+                    if testvocabid == vocabid {
+                        return true;
+                    }
+                }
+            },
+            PatternMatch::FromLexicon(lextest) =>  {
+                if let Some((_vocabid, lexindex)) = sequence.get(index) {
+                    if lexindex & (1 << lextest) == 1 << lextest {
+                        return true;
+                    }
+                }
+            },
+            PatternMatch::Not(pm) => {
+                return !pm.matches(sequence, index);
+            },
+            PatternMatch::Disjunction(pms) => {
+                for pm in pms.iter() {
+                    if pm.matches(sequence, index) {
+                        return true;
+                    }
+                }
+            },
+        };
+        false
+    }
+
+    pub fn parse(s: &str, lexicons: &Vec<String>, encoder: &VocabEncoder) -> Result<Self,std::io::Error> {
+        let s = s.trim();
+        if s == "?" {
+            Ok(Self::Any)
+        } else if s == "^" {
+            Ok(Self::NoLexicon)
+        } else if s.starts_with("!(") && s.ends_with(")") {
+            //negation over a disjunction
+            let s = &s[2..s.len() - 1];
+            let pm = Self::parse(s, lexicons, encoder)?;
+            Ok(Self::Not(Box::new(pm)))
+        } else if s.find("|").is_some() {
+            let items_in: Vec<&str> = s.split("|").collect();
+            let mut items_out: Vec<Self> = Vec::new();
+            for item in items_in {
+                match Self::parse(item, lexicons, encoder) {
+                    Ok(pm) => items_out.push(pm),
+                    Err(err) => return Err(err)
+                };
+            }
+            Ok(Self::Disjunction(Box::new(items_out)))
+        } else if s.starts_with("!") {
+            //negation
+            let s = &s[1..];
+            let pm = Self::parse(s, lexicons, encoder)?;
+            Ok(Self::Not(Box::new(pm)))
+        } else if s.starts_with("@") {
+            let source = &s[1..];
+            let relsource = format!("/{}", source);
+            for (i, lexicon) in lexicons.iter().enumerate() {
+                if source == lexicon || lexicon.ends_with(&relsource) {
+                    return Ok(Self::FromLexicon(i as u8));
+                }
+            }
+            Err(std::io::Error::new(std::io::ErrorKind::Other, format!("WARNING: Context rule references lexicon or variant list '{}' but this source was not loaded", source)))
+        } else {
+            if let Some(vocab_id) = encoder.get(s) {
+                return Ok(Self::Vocab(*vocab_id));
+            }
+            Err(std::io::Error::new(std::io::ErrorKind::Other, format!("WARNING: Context rule references word '{}' but this word does not occur in any lexicon", s)))
+        }
+    }
+}
+
+
+impl ContextRule {
+    pub fn invert_score(&self) -> f32 {
+        return 1.0 / self.score;
+    }
+
+    pub fn len(&self) -> usize {
+        self.pattern.len()
+    }
+
+    ///Checks if the sequence of the contextrole is present in larger sequence
+    ///provided as parameter. Returns the number of matches
+    pub fn find_matches(&self, sequence: &[(VocabId,u32)], sequence_result: &mut Vec<Option<PatternMatchResult>>) -> usize {
+        assert_eq!(sequence.len(), sequence_result.len());
+        let mut matches = 0;
+        if self.pattern.len() > sequence.len() {
+            return 0;
+        }
+        for begin in 0..(sequence.len() - self.pattern.len()) {
+            let mut found = true;
+            for (cursor, contextmatch) in self.pattern.iter().enumerate() {
+                if sequence_result[begin+cursor].is_some() || !contextmatch.matches(sequence, begin+cursor) {
+                     found = false;
+                     break;
+                }
+            }
+            if found {
+                for cursor in 0..self.pattern.len() {
+                    sequence_result[begin+cursor] =
+                        Some(PatternMatchResult {
+                            score: self.score,
+                            tag: if self.tagoffset.is_none() {
+                                self.tag
+                            } else if cursor as u8 >= self.tagoffset.unwrap().0 && (cursor as u8) < self.tagoffset.unwrap().0 + self.tagoffset.unwrap().1 {
+                                self.tag
+                            } else {
+                                None
+                            },
+                            seqnr: if let Some(tagoffset) = self.tagoffset {
+                                cursor as u8 - tagoffset.0
+                            } else {
+                                cursor as u8
+                            }
+                        });
+                }
+                matches += 1
+            }
+        }
+        matches
+    }
+}
+
+
+/// Remap all UTF-8 offsets to unicode codepoint offsets
+pub(crate) fn remap_offsets_to_unicodepoints<'a>(text: &'a str, mut matches: Vec<Match<'a>>) -> Vec<Match<'a>> {
+    let mut bytes2unicodepoints: Vec<Option<usize>> = Vec::new();
+    let mut end = 0;
+    for (unicodeoffset, (byteoffset, _char)) in text.char_indices().enumerate() {
+        for _ in bytes2unicodepoints.len()..byteoffset {
+            bytes2unicodepoints.push(None);
+        }
+        bytes2unicodepoints.push(Some(unicodeoffset));
+        end = unicodeoffset+1;
+    }
+    //add an end offset
+    bytes2unicodepoints.push(Some(end));
+    for m in matches.iter_mut() {
+        m.offset.convert(&bytes2unicodepoints);
+    }
+    matches
+}

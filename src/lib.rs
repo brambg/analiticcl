@@ -80,6 +80,11 @@ pub struct VariantModel {
     /// Do we have an LM?
     pub have_lm: bool,
 
+    /// Context rules
+    pub context_rules: Vec<ContextRule>,
+    /// Tags used by the context rules
+    pub tags: Vec<String>,
+
     ///Weights used in distance scoring
     pub weights: Weights,
 
@@ -113,6 +118,8 @@ impl VariantModel {
             lexicons: Vec::new(),
             confusables: Vec::new(),
             confusables_before_pruning: false,
+            context_rules: Vec::new(),
+            tags: Vec::new(),
             debug,
         };
         model.read_alphabet(alphabet_file).expect("Error loading alphabet file");
@@ -137,6 +144,8 @@ impl VariantModel {
             lexicons: Vec::new(),
             confusables: Vec::new(),
             confusables_before_pruning: false,
+            context_rules: Vec::new(),
+            tags: Vec::new(),
             debug,
         };
         init_vocab(&mut model.decoder, &mut model.encoder);
@@ -395,6 +404,16 @@ impl VariantModel {
     /// have already been added previously through a more authoritative lexicon.
     pub fn add_variant(&mut self, ref_id: VocabId, variant: &str, score: f64, freq: Option<u32>, params: &VocabParams) -> bool {
         let variantid = self.add_to_vocabulary(variant, freq, &params);
+        self.add_variant_by_id(ref_id, variantid, score)
+    }
+
+    /// Add a (weighted) variant to the model, referring to a reference that already exists in
+    /// the model.
+    /// Variants will be added
+    /// to the lexicon automatically when necessary. Set VocabType::TRANSPARENT
+    /// if you want variants to only be used as an intermediate towards items that
+    /// have already been added previously through a more authoritative lexicon.
+    pub fn add_variant_by_id(&mut self, ref_id: VocabId, variantid: VocabId, score: f64) -> bool {
         if variantid != ref_id {
             //link reference to variant
             if let Some(vocabvalue) = self.decoder.get_mut(ref_id as usize) {
@@ -438,7 +457,7 @@ impl VariantModel {
     ///The parameters define what value can be read from what column
     pub fn read_vocabulary(&mut self, filename: &str, params: &VocabParams) -> Result<(), std::io::Error> {
         if self.debug >= 1 {
-            eprintln!("Reading vocabulary #{} from {}...", self.lexicons.len() + 1, filename);
+            eprintln!("Reading vocabulary #{} from {} ({:?})...", self.lexicons.len() + 1, filename, params.vocab_type);
         }
         let beginlen = self.decoder.len();
         let f = File::open(filename)?;
@@ -467,6 +486,94 @@ impl VariantModel {
         }
         self.lexicons.push(filename.to_string());
         Ok(())
+    }
+
+    pub fn read_contextrules(&mut self, filename: &str) -> Result<(), std::io::Error> {
+        if self.debug >= 1 {
+            eprintln!("Reading context rules {}...",  filename);
+        }
+        let f = File::open(filename)?;
+        let f_buffer = BufReader::new(f);
+        for line in f_buffer.lines() {
+            if let Ok(line) = line {
+                if !line.is_empty() && !line.starts_with('#') {
+                    let fields: Vec<&str> = line.split("\t").collect();
+                    if fields.len() < 2 {
+                        return Err(std::io::Error::new(std::io::ErrorKind::Other, "Expected at least two columns in context rules file"));
+                    }
+
+                    let pattern: &str = fields.get(0).unwrap();
+                    let score = fields.get(1).unwrap().parse::<f32>().expect("context rule score should be a floating point value above or below 1.0");
+
+                    self.add_contextrule(pattern, score, fields.get(2).map(|s| *s), fields.get(3).map(|s| *s));
+
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+
+    pub fn add_contextrule(&mut self, pattern: &str, score: f32, tag: Option<&str>, tagoffset: Option<&str>) {
+        let expressions: Vec<&str> = pattern.split(";").map(|s| s.trim()).collect();
+        let mut pattern: Vec<PatternMatch> = Vec::new();
+        for expr in expressions {
+            match PatternMatch::parse(expr, &self.lexicons, &self.encoder) {
+                Ok(pm) => pattern.push(pm),
+                Err(err) => eprintln!("Error parsing context rule: {}", err)
+            }
+        }
+
+        let tag: Option<u16> = tag.map(|tag| {
+            let mut pos = None;
+            for (i, t) in self.tags.iter().enumerate() {
+                if t == tag {
+                    pos = Some(i as u16);
+                    break;
+                }
+            }
+            if pos.is_none() {
+                self.tags.push(tag.to_string());
+                (self.tags.len() - 1) as u16
+            } else {
+                pos.unwrap()
+            }
+        });
+
+        let tagoffset: Option<(u8,u8)> = tagoffset.map(|s| {
+            let fields: Vec<&str> = s.split(":").collect();
+            let tagbegin: u8 = if let Some(tagbegin) = fields.get(0) {
+                if tagbegin.is_empty() {
+                    0
+                } else {
+                    tagbegin.parse::<u8>().expect("tag offset should be an integer")
+                }
+            } else {
+                0
+            };
+            let taglength: u8 = if let Some(taglength) = fields.get(1) {
+                if taglength.is_empty() {
+                    pattern.len() as u8 - tagbegin
+                } else {
+                    taglength.parse::<u8>().expect("tag length should be an integer")
+                }
+            } else {
+                pattern.len() as u8 - tagbegin
+            };
+
+            (tagbegin,taglength)
+        });
+
+
+        if !pattern.is_empty() {
+            self.context_rules.push( ContextRule {
+                pattern: pattern,
+                score: score,
+                tag: tag,
+                tagoffset: tagoffset
+            });
+        }
     }
 
     ///Read a weighted variant list from a TSV file. Contains a canonical/reference form in the
@@ -511,9 +618,11 @@ impl VariantModel {
                         //autodetect whether we have frequency information or not
                         if (fields.len() - 2) % 3 == 0 {
                             let freq = fields.get(1).expect("second field");
-                            has_freq = Some(true);
                             match freq.parse::<u32>() {
-                                Ok(freq) => Some(freq),
+                                Ok(freq) => {
+                                    has_freq = Some(true);
+                                    Some(freq)
+                                },
                                 _ => None
                             }
                         } else {
@@ -533,7 +642,7 @@ impl VariantModel {
                     if has_freq == Some(true) {
                         iter.next(); iter.next();
                         while let (Some(variant), Some(score), Some(freq)) = (iter.next(), iter.next(), iter.next()) {
-                            let score = score.parse::<f64>().expect(format!("Variant scores must be a floating point value (line {} of {})", linenr, filename).as_str());
+                            let score = score.parse::<f64>().expect(format!("Variant scores must be a floating point value (line {} of {}, got {} instead), also parsing frequency", linenr, filename, score).as_str());
                             let freq = freq.parse::<u32>().expect(format!("Variant frequency must be an integer (line {} of {}), got {} instead", linenr, filename, freq).as_str());
                             if self.add_variant(ref_id, variant, score, Some(freq), if transparent { &transparent_params } else { &params } ) {
                                 count += 1;
@@ -542,7 +651,7 @@ impl VariantModel {
                     } else {
                         iter.next();
                         while let (Some(variant), Some(score)) = (iter.next(), iter.next()) {
-                            let score = score.parse::<f64>().expect(format!("Variant scores must be a floating point value (line {} of {})", linenr, filename).as_str());
+                            let score = score.parse::<f64>().expect(format!("Variant scores must be a floating point value (line {} of {}, got {}), no frequency information", linenr, filename, score).as_str());
                             if self.add_variant(ref_id, variant, score, None, if transparent { &transparent_params } else { &params } ) {
                                 count += 1;
                             }
@@ -583,7 +692,6 @@ impl VariantModel {
                     };
                 },
                 FrequencyHandling::Replace => {
-                    item.lexindex = params.index;
                     item.frequency = frequency;
                 },
             }
@@ -593,8 +701,9 @@ impl VariantModel {
                 //we can lose the transparency flag if a later lexicon doesn't provide it
                 item.vocabtype ^= VocabType::TRANSPARENT;
             }
+            item.lexindex |= 1 << params.index;
             if self.debug >= 3 {
-                eprintln!("    (updated) freq={}, lexindex={}", item.frequency, item.lexindex);
+                eprintln!("    (updated) freq={}, lexindex+={}", item.frequency, params.index);
             }
             *vocab_id
         } else {
@@ -605,7 +714,7 @@ impl VariantModel {
                 norm: text.normalize_to_alphabet(&self.alphabet),
                 frequency: frequency,
                 tokencount: text.chars().filter(|c| *c == ' ').count() as u8 + 1,
-                lexindex: params.index,
+                lexindex:  1 << params.index,
                 variants: None,
                 vocabtype: params.vocab_type
             });
@@ -635,6 +744,10 @@ impl VariantModel {
                 (normstring.len() as f32 * x).floor() as u8,
                 MAX_ANAGRAM_DISTANCE, //absolute maximum as a safeguard
             ),
+            DistanceThreshold::RatioWithLimit(x,limit) => min(
+                (normstring.len() as f32 * x).floor() as u8,
+                limit,
+            ),
             DistanceThreshold::Absolute(x) => min(
                     x,
                     (normstring.len() as f64 / 2.0).floor() as u8 //we still override the absolute threshold when dealing with very small inputs
@@ -652,6 +765,10 @@ impl VariantModel {
                 (normstring.len() as f32 * x).floor() as u8,
                 MAX_EDIT_DISTANCE, //absolute maximum as a safeguard
             ),
+            DistanceThreshold::RatioWithLimit(x,limit) => min(
+                (normstring.len() as f32 * x).floor() as u8,
+                limit,
+            ),
             DistanceThreshold::Absolute(x) => min(
                     x,
                     (normstring.len() as f64 / 2.0).floor() as u8 //we still override the absolute threshold when dealing with very small inputs
@@ -665,13 +782,32 @@ impl VariantModel {
         self.score_and_rank(variants, input, normstring.len(), params.max_matches, params.score_threshold, params.cutoff_threshold, params.freq_weight)
     }
 
+
+    ///Auxiliary function used by [`learn_variants()`], abstracts over strict mode
+    fn find_variants_for_learning<'a>(&self, inputstr: &'a str, params: &SearchParameters, strict: bool) -> Vec<(&'a str, VariantResult)> {
+        if strict {
+            self.find_variants(inputstr, params).into_iter().map(|result| (inputstr, result)).collect()
+        } else {
+            self.find_all_matches(inputstr, params).iter().filter_map(|result_match| {
+                if let Some(variants) = &result_match.variants {
+                    if let Some(selected) = result_match.selected {
+                        if let Some(result) = variants.get(selected) {
+                            return Some((result_match.text, result.clone()));
+                        }
+                    }
+                }
+                None
+            }).collect()
+        }
+    }
+
     /// Processes input and finds variants (like [`find_variants()`]), but all variants that are found (which meet
     /// the set thresholds) will be stored in the model rather than returned. Unlike `find_variants()`, this is
     /// invoked with an iterator over multiple inputs and returns no output by itself. It
     /// will automatically apply parallellisation.
-    pub fn learn_variants<'a, I>(&mut self, input: I, params: &SearchParameters, auto_build: bool) -> (usize, usize)
+    pub fn learn_variants<'a, I>(&mut self, input: I, params: &SearchParameters, strict: bool, auto_build: bool) -> usize
     where
-        I: IntoParallelIterator<Item = &'a (String, Option<u32>)> + IntoIterator<Item = &'a (String, Option<u32>)>,
+        I: IntoParallelIterator<Item = &'a String> + IntoIterator<Item = &'a String>,
     {
         if self.debug >= 1 {
             eprintln!("(Learning variants)");
@@ -679,14 +815,14 @@ impl VariantModel {
 
         let vocabparams = VocabParams::default().with_vocab_type(VocabType::TRANSPARENT).with_freq_handling(FrequencyHandling::Max);
 
-        let mut all_variants: Vec<(&'a str, Option<u32>, Vec<VariantResult>)> = Vec::new();
+        let mut all_variants: Vec<Vec<(&'a str, VariantResult)>> = Vec::new();
         if params.single_thread {
-            all_variants.extend( input.into_iter().map(|(inputstr, freq)| {
-                (inputstr.as_str(), *freq, self.find_variants(inputstr, params))
+            all_variants.extend( input.into_iter().map(|inputstr| {
+                self.find_variants_for_learning(inputstr.as_str(), params, strict)
             }));
         } else {
-            all_variants.par_extend( input.into_par_iter().map(|(inputstr, freq)| {
-                (inputstr.as_str(), *freq, self.find_variants(inputstr, params))
+            all_variants.par_extend( input.into_par_iter().map(|inputstr| {
+                self.find_variants_for_learning(inputstr.as_str(), params, strict)
             }));
         }
 
@@ -694,25 +830,35 @@ impl VariantModel {
             eprintln!("(adding variants over {} input items to the model)", all_variants.len());
         }
 
+
         let mut count = 0;
-        let mut unknown = 0;
-        for (inputstr, freq, variants) in all_variants {
-            //we add it to the vocabulary manually once (because add_weighted_variant doesn't handle freq)
-            let vocab_id = self.add_to_vocabulary(inputstr, freq, &vocabparams);
-            if variants.is_empty() {
-                unknown += 1;
-            }
-            for result in variants {
-                if result.vocab_id != vocab_id { //ensure we don't add exact matches
-                    if self.add_variant(result.vocab_id, inputstr, result.dist_score, None, &vocabparams) {
-                        count += 1;
-                    }
+        let mut prev = None;
+        for (inputstr, result) in all_variants.into_iter().flatten() {
+            //get a vocabulary id for the input string;
+            //adding it to the vocabulary if it does not exist yet
+            let vocab_id = if let Some(vocab_id) = self.encoder.get(inputstr) {
+                //item exists
+                let vocabitem = self.decoder.get_mut(*vocab_id as usize).expect("item must exist");
+                //is this the first occurrence in a consecutive sequence?
+                if prev != Some(inputstr) {
+                    //then increment the frequency
+                    vocabitem.frequency += 1;
+                }
+                *vocab_id
+            } else {
+                //item is new
+                self.add_to_vocabulary(inputstr, Some(1), &vocabparams)
+            };
+            if result.vocab_id != vocab_id { //ensure we don't add exact matches
+                if self.add_variant_by_id(result.vocab_id, vocab_id, result.dist_score) {
+                    count += 1;
                 }
             }
+            prev = Some(inputstr);
         }
 
         if self.debug >= 1 {
-            eprintln!("(added {} weighted variants, unable to match {} input strings)", count, unknown);
+            eprintln!("(added {} variants)", count);
         }
 
         if auto_build {
@@ -721,7 +867,7 @@ impl VariantModel {
             }
             self.build();
         }
-        (count, unknown)
+        count
     }
 
 
@@ -925,7 +1071,7 @@ impl VariantModel {
     /// Rank and score all variants, returns a vector of three-tuples: (VocabId, distance score, frequency score)
     pub(crate) fn score_and_rank(&self, instances: Vec<(VocabId,Distance)>, input: &str, input_length: usize, max_matches: usize, score_threshold: f64, cutoff_threshold: f64, freq_weight: f32) -> Vec<VariantResult> {
         let mut results: Vec<VariantResult> = Vec::new();
-        let mut max_freq = 0;
+        let mut max_freq = 0.0;
         let mut has_expandable_variants = false;
         let weights_sum = self.weights.sum();
 
@@ -938,16 +1084,6 @@ impl VariantModel {
             None
         };
 
-        //Collect maximum frequency
-        for (vocab_id, _distance) in instances.iter() {
-            if self.have_freq {
-                if let Some(vocabitem) = self.decoder.get(*vocab_id as usize) {
-                    if vocabitem.frequency > max_freq {
-                        max_freq = vocabitem.frequency;
-                    }
-                }
-            }
-        }
 
         //Compute scores
         for (vocab_id, distance) in instances.iter() {
@@ -971,11 +1107,14 @@ impl VariantModel {
                     if distance.samecase { self.weights.case } else { 0.0 }
                 ) / weights_sum;
 
-                let freq_score: f64 = if self.have_freq && max_freq > 0 {
-                    vocabitem.frequency as f64 / max_freq as f64
+                let freq_score: f64 = if self.have_freq { //absolute frequency, normalisation in later pass
+                    vocabitem.frequency as f64
                 } else {
                     1.0
                 };
+                if freq_score > max_freq {
+                    max_freq = freq_score;
+                }
 
                 if !has_expandable_variants && vocabitem.variants.is_some() {
                     has_expandable_variants = true;
@@ -1010,6 +1149,19 @@ impl VariantModel {
 
         if has_expandable_variants {
             results = self.expand_variants(results);
+            //Collect maximum frequency after expansion
+            for result in results.iter() {
+                if result.freq_score > max_freq {
+                    max_freq = result.freq_score;
+                }
+            }
+        }
+
+        //normalize frequency score
+        if max_freq > 0.0 {
+            for result in results.iter_mut() {
+                result.freq_score = result.freq_score / max_freq;
+            }
         }
 
         //Sort the results by distance score, descending order
@@ -1132,7 +1284,7 @@ impl VariantModel {
     /// may be expanded.
     pub fn expand_variants(&self, mut results: Vec<VariantResult>) -> Vec<VariantResult> {
         if self.debug >= 3 {
-            eprintln!("   (resolving transparency)");
+            eprintln!("   (expanding variants, resolving transparency)");
         }
         let mut new_results = Vec::with_capacity(results.len());
         let mut count = 0;
@@ -1141,11 +1293,20 @@ impl VariantModel {
             let vocabitem = self.decoder.get(result.vocab_id as usize).expect("vocabitem must exist");
             if let Some(variantrefs) = &vocabitem.variants {
                 for variantref in variantrefs.iter() {
-                    if let VariantReference::VariantOf((target_id,target_score)) = variantref {
+                    if let VariantReference::VariantOf((target_id,variant_dist_score)) = variantref {
                         new_results.push(VariantResult {
                             vocab_id: *target_id,
-                            dist_score: result.dist_score * target_score,
-                            freq_score: result.freq_score,
+                            dist_score: result.dist_score * variant_dist_score,
+                            freq_score: {
+                                //take the minimum frequency of the item we refer to and the one of this variant
+                                //note: frequency score is still absolute (not-normalised) at this point
+                                let targetitem = self.decoder.get(*target_id as usize).expect("vocabitem must exist");
+                                if (targetitem.frequency as f64) < result.freq_score {
+                                    targetitem.frequency as f64
+                                } else {
+                                    result.freq_score
+                                }
+                            },
                             via: Some(result.vocab_id)
                         });
                     }
@@ -1305,7 +1466,7 @@ impl VariantModel {
                 let l = matches.len();
                 //consolidate the matches, finding a single segmentation that has the best (highest
                 //scoring) solution
-                if params.max_ngram > 1 {
+                if params.max_ngram > 1 || self.have_lm || !self.context_rules.is_empty() {
                     //(debug will be handled in the called method)
                     matches.extend(
                         self.most_likely_sequence(batch_matches, boundaries, begin, boundary.offset.begin, params, text_current).into_iter()
@@ -1337,8 +1498,17 @@ impl VariantModel {
                 eprintln!(" (MATCHES={:?})", matches);
             }
         }
-        matches
+        if params.unicodeoffsets {
+            if self.debug >= 1 {
+                eprintln!("(remapping UTF-8 offsets to unicodepoints)");
+            }
+            remap_offsets_to_unicodepoints(text, matches)
+        } else {
+            matches
+        }
     }
+
+
 
 
     /*
@@ -1636,6 +1806,8 @@ impl VariantModel {
         let mut sequences: Vec<Sequence> = Vec::new();
         let mut best_lm_perplexity: f64 = 999999.0; //to be minimised
         let mut best_variant_cost: f32 = (boundaries.len() - 1) as f32 * 2.0; //worst score, to be improved (to be minimised)
+        let mut best_context_score: f64 = 0.0; //to be maximised
+
         for (i, path)  in fst.paths_iter().enumerate() { //iterates over the n shortest path hypotheses (does not return them in weighted order)
             let variant_cost: f32 = *path.weight.value();
             let mut sequence = Sequence::new(variant_cost);
@@ -1655,19 +1827,38 @@ impl VariantModel {
                     best_lm_perplexity = sequence.perplexity;
                 }
             }
+            if !self.context_rules.is_empty() {
+                //Apply context rules and apply tags (if any), considers context
+                let (context_score, sequence_results) = self.test_context_rules(&sequence);
+                sequence.context_score = context_score;
+                sequence.tags = sequence_results.into_iter().map(|x| match x {
+                    Some(y) => if let (Some(tag), seqnr) = (y.tag,y.seqnr) {
+                        Some((tag,seqnr))
+                    } else {
+                        None
+                    },
+                    None => None
+                }).collect();
+                if self.debug >= 3 && sequence.context_score != 1.0 {
+                    eprintln!("   (context_score: {})", sequence.context_score);
+                }
+            }
             if variant_cost < best_variant_cost {
                 best_variant_cost = variant_cost;
+            }
+            if sequence.context_score > best_context_score {
+                best_context_score = sequence.context_score;
             }
             sequences.push(sequence);
         }
 
-        let mut debug_ranked: Option<Vec<(Sequence, f64, f64, f64)>> = if self.debug >= 1 {
+        let mut debug_ranked: Option<Vec<(Sequence, f64, f64, f64, f64)>> = if self.debug >= 1 {
             Some(Vec::new())
         } else {
             None
         };
 
-        //Compute the normalizes scores
+        //Compute the normalized scores
         let mut best_score: f64 = -99999999.0; //to be maximised
         let mut best_sequence: Option<Sequence> = None;
         for sequence in sequences.into_iter() {
@@ -1678,16 +1869,18 @@ impl VariantModel {
                 0.0
             };
             let norm_variant_score: f64 = (best_variant_cost as f64 / sequence.variant_cost as f64).ln();
+            let norm_context_score: f64 = (sequence.context_score / best_context_score).ln();
 
             //then we interpret the score as a kind of pseudo-probability and minimize the joint
             //probability (the product; addition in log-space)
-            let score = if self.have_lm && params.lm_weight > 0.0 {
-                (params.lm_weight as f64 * norm_lm_score + params.variantmodel_weight as f64 * norm_variant_score) / (params.lm_weight as f64 + params.variantmodel_weight as f64) //note: the denominator isn't really relevant for finding the best score but normalizes the output for easier interpretability (=geometric mean)
-            } else {
+            let score = if (!self.have_lm || params.lm_weight == 0.0) && (self.context_rules.is_empty() || params.contextrules_weight == 0.0) {
+                //no need for full computation, take a shortcut:
                 norm_variant_score
+            } else {
+                (params.lm_weight as f64 * norm_lm_score + params.variantmodel_weight as f64 * norm_variant_score + params.contextrules_weight as f64 * norm_context_score) / (params.lm_weight as f64 + params.variantmodel_weight as f64 + params.contextrules_weight as f64) //note: the denominator isn't really relevant for finding the best score but normalizes the output for easier interpretability (=geometric mean)
             };
             if self.debug >= 1 {
-                debug_ranked.as_mut().unwrap().push( (sequence.clone(), norm_lm_score, norm_variant_score, score) );
+                debug_ranked.as_mut().unwrap().push( (sequence.clone(), norm_lm_score, norm_variant_score, norm_context_score, score) );
             }
             if score > best_score || best_sequence.is_none() {
                 best_score = score;
@@ -1697,13 +1890,9 @@ impl VariantModel {
 
         if self.debug >= 1 {
             //debug mode: output all candidate sequences and their scores in order
-            debug_ranked.as_mut().unwrap().sort_by(|a,b| b.3.partial_cmp(&a.3).unwrap_or(Ordering::Equal) ); //sort by score
-            for (i, (sequence, norm_lm_score, norm_variant_score, score)) in debug_ranked.unwrap().into_iter().enumerate() {
-                if self.have_lm && params.lm_weight > 0.0 {
-                    eprintln!("  (#{}, final_score={}, norm_lm_score={} (perplexity={}, logprob={}, weight={}), norm_variant_score={} (variant_cost={}, weight={})", i+1, score.exp(), norm_lm_score.exp(), sequence.perplexity, sequence.lm_logprob, params.lm_weight,  norm_variant_score.exp(), sequence.variant_cost, params.variantmodel_weight);
-                } else {
-                    eprintln!("  (#{}, final_score={}, norm_variant_score={} (variant_cost={}, weight={}), no LM", i+1, score.exp(),   norm_variant_score.exp(), sequence.variant_cost, params.variantmodel_weight);
-                }
+            debug_ranked.as_mut().unwrap().sort_by(|a,b| b.4.partial_cmp(&a.4).unwrap_or(Ordering::Equal) ); //sort by score
+            for (i, (sequence, norm_lm_score, norm_variant_score, norm_context_score, score)) in debug_ranked.unwrap().into_iter().enumerate() {
+                eprintln!("  (#{}, final_score={}, norm_lm_score={} (perplexity={}, logprob={}, weight={}), norm_variant_score={} (variant_cost={}, weight={}), norm_context_score={} (context_score={}, weight={})", i+1, score.exp(), norm_lm_score.exp(), sequence.perplexity, sequence.lm_logprob, params.lm_weight,  norm_variant_score.exp(), sequence.variant_cost, params.variantmodel_weight, norm_context_score.exp(), sequence.context_score, params.contextrules_weight);
                 let mut text: String = String::new();
                 for output_symbol in sequence.output_symbols.iter() {
                     if output_symbol.vocab_id > 0{
@@ -1719,14 +1908,63 @@ impl VariantModel {
         }
 
         //return matches corresponding to best sequence
-        best_sequence.expect("there must be a best sequence").output_symbols.into_iter().map(|osym| {
+        let best_sequence = best_sequence.expect("there must be a best sequence");
+        best_sequence.output_symbols.iter().enumerate().map(|(i,osym)| {
             let m = matches.get(osym.match_index).expect("match should be in bounds");
             let mut m = m.clone();
             m.selected = osym.variant_index;
+            if !best_sequence.tags.is_empty() {
+                if let Some(Some((tag, seqnr))) = best_sequence.tags.get(i) {
+                    m.tag = Some(*tag);
+                    m.seqnr = Some(*seqnr);
+                }
+            }
             m
         }).collect()
     }
 
+    /// Favours or penalizes certain combinations of lexicon matches. matching words X and Y
+    /// respectively with lexicons A and B might be favoured over other combinations.
+    /// This returns either a bonus or penalty (number slightly above/below 1.0) score/
+    /// for the sequence as a whole.
+    pub fn test_context_rules<'a>(&self, sequence: &Sequence) -> (f64, Vec<Option<PatternMatchResult>>) {
+        let sequence: Vec<(VocabId,u32)> = sequence.output_symbols.iter().map(|output_symbol|
+            if output_symbol.vocab_id == 0 {
+                (output_symbol.vocab_id, 0)
+            } else {
+                if let Some(vocabvalue) = self.decoder.get(output_symbol.vocab_id as usize) {
+                    (output_symbol.vocab_id, vocabvalue.lexindex)
+                } else {
+                    (output_symbol.vocab_id, 0)
+                }
+            }).collect();
+
+        //The sequence will flag which items in the sequence have been covered by matches (Some),
+        //and if so, what context rule scores apply to that match. It's later used to compute
+        //the final score
+        //                             score --v    v--- tag
+        let mut sequence_results: Vec<Option<PatternMatchResult>> = vec![None; sequence.len()];
+
+        let mut found = false;
+        for context_rule in self.context_rules.iter() {
+            if context_rule.find_matches(&sequence, &mut sequence_results) > 0 {
+                found = true;
+            }
+        }
+
+        if !found {
+            (1.0, sequence_results) //just a shortcut to prevent unnecessary computation
+        } else {
+            (
+                sequence_results.iter().map(|x| match x {
+                Some(x) => x.score,
+                None => 1.0
+                }).sum::<f32>() as f64 / sequence.len() as f64
+                ,
+                sequence_results
+            )
+        }
+    }
 
     /// Computes the logprob and perplexity for a given sequence as produced in
     /// most_likely_sequence()
@@ -1849,29 +2087,29 @@ impl VariantModel {
         match word_dec.tokencount {
             0 => Ok(NGram::Empty),
             1 => Ok(NGram::UniGram(
-                self.encode_token(iter.next().expect("ngram part"), false, unseen_parts)
+                self.encode_token(iter.next().expect("ngram part"), true, unseen_parts)
             )),
             2 => Ok(NGram::BiGram(
-                self.encode_token(iter.next().expect("ngram part"), false, unseen_parts),
-                self.encode_token(iter.next().expect("ngram part"), false, unseen_parts)
+                self.encode_token(iter.next().expect("ngram part"), true, unseen_parts),
+                self.encode_token(iter.next().expect("ngram part"), true, unseen_parts)
             )),
             3 => Ok(NGram::TriGram(
-                self.encode_token(iter.next().expect("ngram part"), false, unseen_parts),
-                self.encode_token(iter.next().expect("ngram part"), false, unseen_parts),
-                self.encode_token(iter.next().expect("ngram part"), false, unseen_parts)
+                self.encode_token(iter.next().expect("ngram part"), true, unseen_parts),
+                self.encode_token(iter.next().expect("ngram part"), true, unseen_parts),
+                self.encode_token(iter.next().expect("ngram part"), true, unseen_parts)
             )),
             4 => Ok(NGram::QuadGram(
-                self.encode_token(iter.next().expect("ngram part"), false, unseen_parts),
-                self.encode_token(iter.next().expect("ngram part"), false, unseen_parts),
-                self.encode_token(iter.next().expect("ngram part"), false, unseen_parts),
-                self.encode_token(iter.next().expect("ngram part"), false, unseen_parts)
+                self.encode_token(iter.next().expect("ngram part"), true, unseen_parts),
+                self.encode_token(iter.next().expect("ngram part"), true, unseen_parts),
+                self.encode_token(iter.next().expect("ngram part"), true, unseen_parts),
+                self.encode_token(iter.next().expect("ngram part"), true, unseen_parts)
             )),
             5 => Ok(NGram::QuintGram(
-                self.encode_token(iter.next().expect("ngram part"), false, unseen_parts),
-                self.encode_token(iter.next().expect("ngram part"), false, unseen_parts),
-                self.encode_token(iter.next().expect("ngram part"), false, unseen_parts),
-                self.encode_token(iter.next().expect("ngram part"), false, unseen_parts),
-                self.encode_token(iter.next().expect("ngram part"), false, unseen_parts)
+                self.encode_token(iter.next().expect("ngram part"), true, unseen_parts),
+                self.encode_token(iter.next().expect("ngram part"), true, unseen_parts),
+                self.encode_token(iter.next().expect("ngram part"), true, unseen_parts),
+                self.encode_token(iter.next().expect("ngram part"), true, unseen_parts),
+                self.encode_token(iter.next().expect("ngram part"), true, unseen_parts)
             )),
             _ => simple_error::bail!("Can only deal with n-grams up to order 5")
         }
@@ -1942,3 +2180,4 @@ impl VariantModel {
 
 
 }
+
